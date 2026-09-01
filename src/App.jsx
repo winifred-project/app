@@ -43,17 +43,57 @@ const palette = {
 function unitsFrom(ml, abv) { return Math.round((ml * abv) / 100) / 10; }
 // Alcohol is 7 kcal per gram; a UK unit is 8g of alcohol, so kcal from alcohol = units x 56.
 function kcalFrom(units) { return Math.round(units * 56); }
+// DRK-1/DRK-4: per-drink units always show one decimal so "2.0u" reads as exact,
+// not as a rounded-off guess sitting next to "2.6u".
+function fmtUnits(u) { return Number(u).toFixed(1); }
+
+// DRK-7/8/9: drink types seed the generic buttons. Each type seeds one "out" and
+// one "at home" version of the same drink, because the price gap between venues is
+// larger and more behaviourally telling than any ABV difference (MET-2, MET-3).
+// Values sit at an honest middle, not an optimistic low: an unedited default biases
+// every week the same way, and P2 says every number shown must be true.
+const DRINK_TYPES = [
+  {
+    id: "beer",
+    label: "Beer & cider",
+    seeds: [
+      { label: "Pint out", ml: 568, abv: 4.5, cost: 6.5 },
+      { label: "Can at home", ml: 440, abv: 4.5, cost: 2.2 },
+    ],
+  },
+  {
+    id: "wine",
+    label: "Wine",
+    seeds: [
+      { label: "Glass out", ml: 175, abv: 12.5, cost: 7 },
+      { label: "Glass at home", ml: 175, abv: 12.5, cost: 1.8 },
+    ],
+  },
+  {
+    id: "spirits",
+    label: "Spirits",
+    seeds: [
+      { label: "Double out", ml: 50, abv: 40, cost: 8 },
+      { label: "Spirit at home", ml: 50, abv: 40, cost: 1.6 },
+    ],
+  },
+];
+
+// Seeds carry a `seed` tag so unticking a type removes only its own untouched
+// buttons and never something the user added themselves (DRK-7).
+function seedDrinks(typeId) {
+  const t = DRINK_TYPES.find((x) => x.id === typeId);
+  if (!t) return [];
+  return t.seeds.map((d) => ({ ...d, units: unitsFrom(d.ml, d.abv), seed: typeId }));
+}
 
 const defaultState = {
   onboarded: false,
   budget: 14,
   companionName: "Winifred",
   show: { kcal: true, money: true },
-  drinks: [
-    { label: "Pint of lager", ml: 568, abv: 4.0, units: 2.3, cost: 6.5 },
-    { label: "Glass of wine", ml: 175, abv: 12.5, units: 2.2, cost: 7 },
-    { label: "Spirit + mixer", ml: 35, abv: 40, units: 1.4, cost: 8 },
-  ],
+  drinkTypes: ["beer"],
+  drinks: seedDrinks("beer"),
   seasonStart: null,
   logs: [],
   cravingsWon: [],
@@ -171,7 +211,14 @@ async function loadState() {
   if (raw) {
     try {
       const parsed = JSON.parse(raw);
-      return { ...defaultState, ...parsed, ai: { ...defaultState.ai, ...(parsed.ai || {}) }, show: { ...defaultState.show, ...(parsed.show || {}) } };
+      return {
+        ...defaultState, ...parsed,
+        ai: { ...defaultState.ai, ...(parsed.ai || {}) },
+        show: { ...defaultState.show, ...(parsed.show || {}) },
+        // Pre-chip-row saves: no type was ever chosen, so tick nothing rather than
+        // inheriting the fresh-install default and mislabelling their own drinks (DRK-7).
+        drinkTypes: Array.isArray(parsed.drinkTypes) ? parsed.drinkTypes : [],
+      };
     } catch (e) { /* corrupted; fall through */ }
   }
   return JSON.parse(JSON.stringify(defaultState));
@@ -680,10 +727,10 @@ export default function Winifred() {
         <div style={{ width: "100%", maxWidth: 420 }}>
           <h2 style={{ fontSize: 24, fontWeight: 800, marginBottom: 4 }}>What do you actually drink?</h2>
           <p style={{ color: palette.inkDim, fontSize: 14.5, lineHeight: 1.55, marginTop: 0 }}>
-            These become your one-tap log buttons, so make them your real regulars: the exact can, the actual glass. Honest buttons make every number in the game true. Bin the defaults if they're not you; you can change all of this later in Settings.
+            These become your one-tap log buttons. Honest ones make every number in the game true, and you can change the lot later in Settings.
           </p>
           <div style={{ ...card, marginTop: 8 }}>
-            <DrinkEditor drinks={state.drinks} onChange={(drinks) => update({ drinks })} say={say} />
+            <DrinkEditor drinks={state.drinks} onChange={(drinks) => update({ drinks })} say={say} types={state.drinkTypes || []} onTypes={(drinkTypes, drinks) => update({ drinkTypes, drinks })} />
           </div>
           <div style={{ marginTop: 16 }}>
             <BigButton tone="warm" onClick={() => setScreen("ai")}>
@@ -744,7 +791,7 @@ export default function Winifred() {
               </label>
             </div>
             <div style={{ marginTop: 18 }}>
-              <DrinkEditor drinks={state.drinks} onChange={(drinks) => update({ drinks })} say={say} />
+              <DrinkEditor drinks={state.drinks} onChange={(drinks) => update({ drinks })} say={say} types={state.drinkTypes || []} onTypes={(drinkTypes, drinks) => update({ drinkTypes, drinks })} />
             </div>
             <div style={{ marginTop: 18 }}>
               <QuestSuggester
@@ -797,6 +844,7 @@ export default function Winifred() {
                         ...parsed,
                         ai: { ...defaultState.ai, ...(parsed.ai || {}) },
                         show: { ...defaultState.show, ...(parsed.show || {}) },
+                        drinkTypes: Array.isArray(parsed.drinkTypes) ? parsed.drinkTypes : [],
                         onboarded: true,
                         lastOpen: Date.now(),
                       };
@@ -905,7 +953,7 @@ export default function Winifred() {
               <div style={{ fontSize: 12, color: palette.inkDim, fontWeight: 500, marginTop: 3 }}>
                 {[
                   d.ml ? `${d.ml}ml ${d.abv}%` : null,
-                  `${d.units}u`,
+                  `${fmtUnits(d.units)}u`,
                   state.show.kcal ? `~${kcalFrom(d.units)}kcal` : null,
                   state.show.money ? `£${Number(d.cost).toFixed(2)}` : null,
                 ].filter(Boolean).join(" · ")}
@@ -1129,7 +1177,7 @@ const SIZE_CHIPS = [
   { label: "175ml", ml: 175 }, { label: "250ml", ml: 250 }, { label: "25ml", ml: 25 }, { label: "50ml", ml: 50 },
 ];
 
-function DrinkEditor({ drinks, onChange, say }) {
+function DrinkEditor({ drinks, onChange, say, types = [], onTypes }) {
   const [label, setLabel] = useState("");
   const [ml, setMl] = useState(440);
   const [abv, setAbv] = useState(5.0);
@@ -1139,6 +1187,23 @@ function DrinkEditor({ drinks, onChange, say }) {
   const field = { background: "#0b1215", color: palette.ink, border: `1px solid ${palette.line}`, borderRadius: 10, padding: "10px 12px", fontSize: 14, fontFamily: "inherit", width: "100%", boxSizing: "border-box" };
   const small = { fontSize: 12, color: palette.inkDim, display: "block", marginBottom: 4 };
 
+  // DRK-7: ticking seeds a type's two generic buttons, unticking removes only
+  // those same seeds. Anything the user added stays put, and DRK-3 still holds.
+  function toggleType(id) {
+    if (!onTypes) return;
+    if (types.includes(id)) {
+      const nextTypes = types.filter((t) => t !== id);
+      const nextDrinks = drinks.filter((d) => d.seed !== id);
+      // DRK-3 is the only floor: types can all go once real drinks have replaced them.
+      if (nextDrinks.length === 0) { say("Add one of your own first, then this can go."); return; }
+      onTypes(nextTypes, nextDrinks);
+    } else {
+      const seen = new Set(drinks.map((d) => d.label.toLowerCase()));
+      const add = seedDrinks(id).filter((d) => !seen.has(d.label.toLowerCase()));
+      onTypes([...types, id], [...drinks, ...add]);
+    }
+  }
+
   function addDrink() {
     const name = label.trim();
     const vMl = Number(ml), vAbv = Number(abv), vCost = Number(cost);
@@ -1147,20 +1212,51 @@ function DrinkEditor({ drinks, onChange, say }) {
     if (drinks.some((d) => d.label.toLowerCase() === name.toLowerCase())) { say("You've already got a drink with that name."); return; }
     onChange([...drinks, { label: name, ml: vMl, abv: vAbv, units: unitsFrom(vMl, vAbv), cost: vCost >= 0 ? vCost : 0 }]);
     setLabel("");
-    say(`Added: ${name}, ${unitsFrom(vMl, vAbv)} units a go.`);
+    say(`Added: ${name}, ${fmtUnits(unitsFrom(vMl, vAbv))} units a go.`);
   }
 
   return (
     <div>
+      {onTypes && (
+        <div style={{ marginBottom: 16 }}>
+          <strong style={{ fontSize: 15 }}>What do you mostly drink?</strong>
+          <p style={{ fontSize: 12.5, color: palette.inkDim, lineHeight: 1.5, margin: "6px 0 8px" }}>
+            Just so you don't start with buttons you'll never press.
+          </p>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {DRINK_TYPES.map((t) => {
+              const on = types.includes(t.id);
+              return (
+                <button
+                  key={t.id}
+                  aria-pressed={on}
+                  onClick={() => toggleType(t.id)}
+                  style={{
+                    background: on ? palette.panel : "transparent",
+                    border: `1px solid ${on ? palette.accent : palette.line}`,
+                    color: on ? palette.ink : palette.inkDim,
+                    borderRadius: 999, padding: "6px 14px", fontSize: 13,
+                    cursor: "pointer", fontFamily: "inherit",
+                  }}
+                >
+                  {on ? "✓ " : ""}{t.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
       <strong style={{ fontSize: 15 }}>Your drinks</strong>
       <p style={{ fontSize: 12.5, color: palette.inkDim, lineHeight: 1.5, margin: "6px 0 10px" }}>
-        These become your quick log buttons. Units are worked out for you: ml × ABV% ÷ 1000.
+        Units are worked out for you: ml × ABV% ÷ 1000.
+        {/* DRK-9: only explain the generic seeds while some are actually on screen. */}
+        {drinks.some((d) => d.seed) && ' The "out" and "at home" ones are rough averages for unfamiliar places; name the drinks you actually have most weeks and those numbers get exact.'}
       </p>
       {drinks.map((d) => (
         <div key={d.label} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#0b1215", border: `1px solid ${palette.line}`, borderRadius: 10, padding: "8px 12px", marginBottom: 6, fontSize: 13.5 }}>
           <span>
             {d.label}
-            <span style={{ color: palette.inkDim }}>{d.ml ? ` · ${d.ml}ml at ${d.abv}%` : ""} · {d.units}u · ~{kcalFrom(d.units)}kcal · £{Number(d.cost).toFixed(2)}</span>
+            <span style={{ color: palette.inkDim }}>{d.ml ? ` · ${d.ml}ml at ${d.abv}%` : ""} · {fmtUnits(d.units)}u · ~{kcalFrom(d.units)}kcal · £{Number(d.cost).toFixed(2)}</span>
           </span>
           <button aria-label={`Remove ${d.label}`} onClick={() => { if (drinks.length <= 1) { say("Keep at least one drink button."); return; } onChange(drinks.filter((x) => x.label !== d.label)); }} style={{ background: "none", border: "none", color: palette.inkDim, fontSize: 16, cursor: "pointer", fontFamily: "inherit", padding: "0 2px" }}>×</button>
         </div>
@@ -1188,7 +1284,7 @@ function DrinkEditor({ drinks, onChange, say }) {
           ))}
         </div>
         <p style={{ fontSize: 13.5, margin: "12px 0 10px" }}>
-          = <strong style={{ color: palette.accent }}>{liveUnits} units</strong> · ~{kcalFrom(liveUnits)} kcal from alcohol, per {label.trim() || "drink"}
+          = <strong style={{ color: palette.accent }}>{fmtUnits(liveUnits)} units</strong> · ~{kcalFrom(liveUnits)} kcal from alcohol, per {label.trim() || "drink"}
         </p>
         <BigButton tone="quiet" onClick={addDrink} style={{ padding: "10px 14px", fontSize: 14 }}>Add drink button</BigButton>
       </div>
