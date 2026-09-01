@@ -8,6 +8,28 @@ import React, { useState, useEffect, useRef } from "react";
 
 const STORE_KEY = "winifred-state-v1";
 const LEGACY_KEYS = ["lastorders-state-v3"];
+// Kept out of the main state object on purpose: if the user wipes their
+// data (ONB-5) they have still installed the app, so the prompt should
+// not come back.
+const IOS_INSTALL_KEY = "winifred-ios-install-dismissed";
+
+// iOS installs only from the Share sheet, and only in Safari (spec
+// section 7). Show the instruction once, to the people it applies to.
+function shouldOfferIosInstall() {
+  try {
+    if (localStorage.getItem(IOS_INSTALL_KEY)) return false;
+  } catch (e) { /* storage unavailable; show it, it is only a card */ }
+  const ua = navigator.userAgent || "";
+  const iPadOS = /Macintosh/.test(ua) && navigator.maxTouchPoints > 1;
+  if (!/iPhone|iPad|iPod/.test(ua) && !iPadOS) return false;
+  // Chrome, Firefox and Edge on iOS put the option somewhere else, so the
+  // instruction below would be wrong for them.
+  if (/CriOS|FxiOS|EdgiOS|OPiOS/.test(ua)) return false;
+  const standalone =
+    window.navigator.standalone === true ||
+    (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches);
+  return !standalone;
+}
 const HOUR = 3600 * 1000;
 const DAY = 24 * HOUR;
 
@@ -454,6 +476,7 @@ export default function Winifred() {
   const [screen, setScreen] = useState("home"); // home|setup|ai|urge|settings|chat|recap
   const [toast, setToast] = useState(null);
   const [welcomeBack, setWelcomeBack] = useState(false);
+  const [iosInstall, setIosInstall] = useState(false);
   const now = useNow(1000);
   const toastTimer = useRef(null);
 
@@ -468,6 +491,7 @@ export default function Winifred() {
       if (!s.onboarded) setScreen("setup");
       else if (!s.ai.tier) setScreen("ai");
       if (away) setWelcomeBack(true);
+      if (shouldOfferIosInstall()) setIosInstall(true);
       if (scored.message) say(scored.message);
     });
     // eslint-disable-next-line
@@ -802,6 +826,25 @@ export default function Winifred() {
             <strong style={{ fontSize: 15 }}>You're back.</strong>
             <p style={{ color: palette.inkDim, fontSize: 14, margin: "6px 0 10px", lineHeight: 1.5 }}>Nothing to catch up on and nothing to explain. The map kept your progress. Today is just today.</p>
             <BigButton tone="quiet" onClick={() => setWelcomeBack(false)} style={{ padding: "10px 14px", fontSize: 14 }}>Good to be back</BigButton>
+          </div>
+        )}
+
+        {iosInstall && (
+          <div style={{ ...card, marginTop: 12, borderColor: palette.line }}>
+            <strong style={{ fontSize: 15 }}>Keep {state.companionName} on your home screen</strong>
+            <p style={{ color: palette.inkDim, fontSize: 14, margin: "6px 0 10px", lineHeight: 1.5 }}>
+              Tap the share button at the bottom of Safari, then <em>Add to Home Screen</em>. It opens full screen, works with no signal at all, and your data is held more safely there than in a browser tab.
+            </p>
+            <BigButton
+              tone="quiet"
+              onClick={() => {
+                setIosInstall(false);
+                try { localStorage.setItem(IOS_INSTALL_KEY, "1"); } catch (e) { /* nothing to do */ }
+              }}
+              style={{ padding: "10px 14px", fontSize: 14 }}
+            >
+              Got it
+            </BigButton>
           </div>
         )}
 
