@@ -235,7 +235,7 @@ function tierOptions(caps) {
       line: "Sharpest conversation, but your chat messages and a one-line stats summary are sent to an AI provider.",
       where: "Chat messages leave this device. Drink logs never do.",
       eligible: false,
-      reason: "Needs a server-side key proxy, not included in this dev build. The consent flow exists in the code, ready for when the proxy is wired in.",
+      reason: "Not switched on yet. It needs a small server of its own, so that no key to the AI provider ever sits in the app. Coming later; nothing you do now depends on it.",
     },
   ];
 }
@@ -905,7 +905,7 @@ export default function Winifred() {
         <div style={{ ...card, marginTop: 16 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
             <strong style={{ fontSize: 15 }}>The Reach · {revealed} of 28 regions clear</strong>
-            <span style={{ color: palette.accent, fontWeight: 700 }}>{xp} XP</span>
+            <span style={{ color: palette.accent, fontWeight: 700, marginLeft: 12, whiteSpace: "nowrap" }}>{xp} XP</span>
           </div>
           <FogWorld revealed={revealed} />
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: palette.inkDim, marginTop: 10 }}>
