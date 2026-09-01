@@ -1,50 +1,87 @@
 CONFIDENTIALITY: INTERNAL
 STATUS: DRAFT - UNREVIEWED
 
-# Winifred (dev build)
+# Winifred
 
-A gamified drink-reduction app prototype, packaged as a Vite + React project with a Docker Compose dev setup so it can be tested from a phone on the same wifi network.
+A quiet game about drinking a little less: a privacy-first, installable PWA
+that keeps every piece of personal data on the device it runs on.
 
-## Run it
+Built to `winifred-spec.md` (spec v1.1). Requirement IDs from that document
+are referenced in commit messages and in the code where behaviour is not
+self-evident.
+
+Vite + React, no runtime dependencies beyond React, one component.
+
+## Deploying
+
+Pushing to `main` builds the app and publishes it to GitHub Pages via
+`.github/workflows/deploy.yml`. The live app is at:
+
+```
+https://winifred-project.github.io/app/
+```
+
+`vite.config.js` sets `base: "/app/"` to match that path. If the repository
+is ever renamed, or a custom domain is attached, that value has to change
+with it or nothing will load.
+
+One-off repository setup: Settings > Pages > Build and deployment > Source
+must be set to **GitHub Actions**.
+
+### Before attaching a custom domain
+
+Browser storage is tied to the origin, so moving from `github.io` to a
+custom domain leaves the old data behind on the old origin, which then
+redirects. Export your data first (Settings > Export my data), then import
+it on the new address. Same rule for moving between devices or browsers.
+
+## Notes and limitations
+
+- **Installing.** On iOS the app installs from Safari only: Share > Add to
+  Home Screen. The app says so once, on first run, and then never again.
+  Android and desktop Chrome offer their own install prompt.
+- **Offline.** The whole shell is precached, so every mechanic works with no
+  network. Updates install quietly in the background and apply next launch.
+- **Cloud AI tier** is not switched on. It needs a server-side key proxy
+  (a small Cloudflare Worker) so that no API key ever ships to the browser;
+  that is Phase 2. The consent flow and the tier chooser are already built.
+- **Local-model tier** simulates its download and uses the templated engine
+  as a stand-in; Phase 2 replaces it with WebLLM.
+- **Storage** is localStorage, per-origin. Export regularly: iOS can evict
+  the storage of sites you have not opened in a while, though an installed
+  app is much less likely to be hit.
+- **Not medical advice.** The app is a behavioural prototype and is not
+  suitable for anyone experiencing physical alcohol withdrawal; that needs
+  a GP.
+
+## Local development
+
+```bash
+npm install && npm run dev     # Node 20+
+```
+
+or, with Docker:
 
 ```bash
 docker compose up --build
 ```
 
-Then find your computer's LAN IP address:
-
-- macOS: `ipconfig getifaddr en0`
-- Linux: `hostname -I`
-- Windows: `ipconfig` (look for the IPv4 address of your wifi adapter)
-
-On your phone (same wifi network), open:
-
-```
-http://<your-computer-ip>:5173
-```
-
-The Vite dev server hot-reloads: edit `src/App.jsx` on your machine and the phone updates live.
-
-Without Docker: `npm install && npm run dev` does the same thing (Node 20+).
-
-## Notes and limitations
-
-- **HTTP only.** No HTTPS in this dev setup, so service workers, real PWA install and some capability checks (e.g. WebGPU on some browsers) are restricted. iOS "Add to Home Screen" still creates a working shortcut. For a proper PWA test, deploy to an HTTPS host.
-- **Firewall.** If the phone can't connect, your computer's firewall is probably blocking inbound port 5173.
-- **Storage** is localStorage, per-browser and per-origin. Because the origin is your LAN IP, data won't carry over if your computer's IP changes; use the in-app "Export my data" as insurance.
-- **Cloud AI tier** is intentionally disabled in this build: it requires a server-side key proxy (e.g. a small Cloudflare Worker) so no API key ever ships to the browser. The consent flow is present in the code, ready for when a proxy is wired in. The templated companion, capability detection, and all game mechanics are fully functional.
-- **Local-model tier** simulates its download and uses the templated engine as a stand-in; a real build would integrate WebLLM or the browser's built-in model API.
-- **Not medical advice.** The app is a behavioural prototype and is not suitable for anyone experiencing physical alcohol withdrawal; that needs a GP.
+Then open `http://<your-computer-ip>:5173` on a phone on the same wifi
+(`ipconfig getifaddr en0` on macOS). The dev server hot-reloads. Note that
+service workers and PWA install do not work over plain http, so test those
+against the deployed HTTPS site.
 
 ## Project structure
 
 ```
+.github/workflows/   build and publish to GitHub Pages on push to main
 docker-compose.yml   dev service, port 5173, live-reload bind mount
 Dockerfile           node:20-alpine + vite dev server on 0.0.0.0
-vite.config.js       host:true so the LAN can reach the server
+vite.config.js       base path, dev server, PWA manifest and service worker
+public/              app icons, generated from the companion artwork
 src/App.jsx          the entire app (single-component prototype)
 src/main.jsx         React entry point
-index.html           shell with mobile viewport + theme colour
+index.html           shell with mobile viewport, theme colour and iOS meta
 ```
 
 ---
@@ -64,9 +101,9 @@ index.html           shell with mobile viewport + theme colour
 | Human Oversight Record | Unreviewed |
 | Personal Data Flag | No personal data. |
 | Intended Audience | Daemon Solutions internal - personal project prototype |
-| Known Limitations | Prototype quality: no automated tests, honour-system logging, localStorage persistence tied to the dev origin, cloud AI tier stubbed pending a key proxy, simulated local-model download. Production build verified to compile (vite build) but not manually tested on-device. |
+| Known Limitations | Prototype quality: no automated tests, honour-system logging, localStorage persistence tied to the deployed origin, cloud AI tier stubbed pending a key proxy, simulated local-model download. Phase 1 packaging verified in headless Chromium at a 400px viewport (onboarding, AI wizard, offline reload under the service worker, CHT-6 and QST-3 safety paths); not yet verified on a physical iPhone. |
 | Confidentiality Classification | INTERNAL |
-| Version | v0.11 |
+| Version | v0.12 |
 
 ### Input Document Register
 
