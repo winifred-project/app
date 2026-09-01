@@ -1,0 +1,13 @@
+services:
+  winifred:
+    build: .
+    ports:
+      - "5173:5173"
+    volumes:
+      # Live-edit: changes on your machine hot-reload in the container.
+      - .:/app
+      # Keep the container's node_modules, don't shadow it with the host dir.
+      - /app/node_modules
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+    restart: unless-stopped
