@@ -28,6 +28,28 @@ with it or nothing will load.
 One-off repository setup: Settings > Pages > Build and deployment > Source
 must be set to **GitHub Actions**.
 
+### Releasing (UPD-1 to UPD-5)
+
+Bump `version` in `package.json` before you push. That number is injected as
+`__APP_VERSION__`, shown in Settings, and is the thing to ask someone for
+when a bug report is vague.
+
+Because the shell is precached, a home-screen launch never touches the
+server, and on iOS the app is resumed rather than reloaded. Nothing would
+notice a new build on its own, so `src/updates.js` asks the service worker
+to look: when the app returns to the foreground, when a connection comes
+back, and hourly while it is open.
+
+Applying is the app's decision, not the worker's. `registerType` is
+`"prompt"` rather than `"autoUpdate"`, because a silent reload can land in
+the middle of a craving encounter (P1). A waiting build is offered on the
+home screen only, is dismissible, and applies itself at the next cold start
+if the offer is ignored. Stored state is untouched either way (DAT-1).
+
+To say something about a release, add one line to `RELEASE_NOTES` in
+`src/App.jsx`, keyed by version. It shows once, and only to someone who was
+already running an earlier build. A version with no entry says nothing.
+
 ### Before attaching a custom domain
 
 Browser storage is tied to the origin, so moving from `github.io` to a
@@ -41,7 +63,8 @@ it on the new address. Same rule for moving between devices or browsers.
   Home Screen. The app says so once, on first run, and then never again.
   Android and desktop Chrome offer their own install prompt.
 - **Offline.** The whole shell is precached, so every mechanic works with no
-  network. Updates install quietly in the background and apply next launch.
+  network. See *Releasing* below for how a new build reaches an installed
+  app.
 - **Cloud AI tier** is not switched on. It needs a server-side key proxy
   (a small Cloudflare Worker) so that no API key ever ships to the browser;
   that is Phase 2. The consent flow and the tier chooser are already built.
@@ -78,6 +101,7 @@ against the deployed HTTPS site.
 docker-compose.yml   dev service, port 5173, live-reload bind mount
 Dockerfile           node:20-alpine + vite dev server on 0.0.0.0
 vite.config.js       base path, dev server, PWA manifest and service worker
+src/updates.js       service worker registration and release checking
 public/              app icons, generated from the companion artwork
 src/App.jsx          the entire app (single-component prototype)
 src/main.jsx         React entry point

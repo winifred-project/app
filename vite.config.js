@@ -1,6 +1,11 @@
+import { readFileSync } from "node:fs";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
+
+// The version people can read in Settings and quote back to you when
+// something is wrong. Single source of truth: bump it in package.json.
+const pkg = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8"));
 
 // base must match the GitHub Pages project path
 // (https://winifred-project.github.io/app/), otherwise the built asset
@@ -12,10 +17,19 @@ const BASE = "/app/";
 // reliably inside Docker bind mounts.
 export default defineConfig({
   base: BASE,
+  define: { __APP_VERSION__: JSON.stringify(pkg.version) },
   plugins: [
     react(),
     VitePWA({
-      registerType: "autoUpdate",
+      // "prompt", not "autoUpdate": an automatic reload can land in the middle
+      // of a craving encounter or a hard conversation, and P1 says that must
+      // never happen. src/updates.js checks for new builds on resume; the app
+      // asks before reloading, and a waiting build applies itself on the next
+      // cold start anyway.
+      registerType: "prompt",
+      // We call registerSW ourselves in src/updates.js, so nothing should be
+      // injected into index.html or the worker gets registered twice.
+      injectRegister: null,
       includeAssets: ["apple-touch-icon.png", "favicon-32.png", "icon.svg"],
       manifest: {
         // Deliberately incurious naming: this appears on the home screen

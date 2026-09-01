@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
+import { APP_VERSION, isUpdateReady, onUpdateReady, checkForUpdate, applyUpdate } from "./updates.js";
 
 // Winifred v3: adds the AI setup wizard and trust layer.
 // New in v3: device capability detection, AI tier chooser (local / built-in /
@@ -87,6 +88,13 @@ function seedDrinks(typeId) {
   return t.seeds.map((d) => ({ ...d, units: unitsFrom(d.ml, d.abv), seed: typeId }));
 }
 
+// One short, plain line per release, shown once after the app has updated
+// itself. It is a note from the companion, not a changelog (P6). A version
+// with no entry here says nothing at all, which is the right default.
+const RELEASE_NOTES = {
+  "0.4.0": "I now look for my own updates when you come back to me, and Settings will tell you which version you're on.",
+};
+
 const defaultState = {
   onboarded: false,
   budget: 14,
@@ -110,6 +118,7 @@ const defaultState = {
   profile: "",
   predictions: [],
   lastOpen: null,
+  lastSeenVersion: null,
   ai: { tier: null, cloudConsent: false, modelDownloaded: false },
 };
 
@@ -531,6 +540,13 @@ export default function Winifred() {
   const [toast, setToast] = useState(null);
   const [welcomeBack, setWelcomeBack] = useState(false);
   const [iosInstall, setIosInstall] = useState(false);
+  // Release delivery. src/updates.js sets this when a new build has installed
+  // and is waiting; the app, not the service worker, decides when it is safe
+  // to apply it (P1: never mid-craving, never mid-conversation).
+  const [updateReady, setUpdateReady] = useState(isUpdateReady());
+  const [updateSnoozed, setUpdateSnoozed] = useState(false);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [whatsNew, setWhatsNew] = useState(null);
   const now = useNow(1000);
   const toastTimer = useRef(null);
 
@@ -539,6 +555,12 @@ export default function Winifred() {
       if (!s.seasonStart) s.seasonStart = Date.now();
       const away = s.lastOpen && Date.now() - s.lastOpen > 3 * DAY;
       s.lastOpen = Date.now();
+      // Shown once after an update, and only to someone who was already
+      // running an earlier build: a fresh install has nothing to catch up on.
+      // Someone already onboarded but with no version recorded was, by
+      // definition, running a build from before this field existed.
+      const previousVersion = s.lastSeenVersion || (s.onboarded ? "pre-0.4.0" : null);
+      s.lastSeenVersion = APP_VERSION;
       const scored = scorePredictions(s);
       setState(scored.state);
       saveState(scored.state);
@@ -546,10 +568,32 @@ export default function Winifred() {
       else if (!s.ai.tier) setScreen("ai");
       if (away) setWelcomeBack(true);
       if (shouldOfferIosInstall()) setIosInstall(true);
+      if (previousVersion && previousVersion !== APP_VERSION && RELEASE_NOTES[APP_VERSION]) {
+        setWhatsNew(RELEASE_NOTES[APP_VERSION]);
+      }
       if (scored.message) say(scored.message);
     });
     // eslint-disable-next-line
   }, []);
+
+  useEffect(() => onUpdateReady(() => setUpdateReady(true)), []);
+
+  async function runUpdateCheck() {
+    setCheckingUpdate(true);
+    const result = await checkForUpdate();
+    setCheckingUpdate(false);
+    if (result === "ready") {
+      setUpdateReady(true);
+      setUpdateSnoozed(false);
+      say("A new version is ready when you are.");
+    } else if (result === "offline") {
+      say("No connection, so I can't check just now. It'll keep.");
+    } else if (result === "unavailable") {
+      say("Nothing to check here. Add me to your home screen and I'll keep myself current.");
+    } else {
+      say(`You're on the latest version (v${APP_VERSION}).`);
+    }
+  }
 
   function update(patch) {
     setState((prev) => {
@@ -859,6 +903,21 @@ export default function Winifred() {
                 }}
               />
             </div>
+            <div style={{ marginTop: 18, paddingTop: 14, borderTop: `1px solid ${palette.line}` }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 14, color: palette.inkDim }}>
+                <span>Version {APP_VERSION}</span>
+                {updateReady && <span style={{ color: palette.accent }}>new version ready</span>}
+              </div>
+              <div style={{ marginTop: 10 }}>
+                <BigButton tone="ghost" disabled={checkingUpdate} onClick={runUpdateCheck}>{checkingUpdate ? "Checking\u2026" : "Check for updates"}</BigButton>
+              </div>
+              {updateReady && (
+                <div style={{ marginTop: 10 }}>
+                  <BigButton tone="quiet" onClick={applyUpdate}>Update now</BigButton>
+                </div>
+              )}
+            </div>
+
             <div style={{ marginTop: 10 }}>
               <BigButton tone="ghost" onClick={() => { const fresh = { ...JSON.parse(JSON.stringify(defaultState)), lastOpen: Date.now() }; setState(fresh); saveState(fresh); setScreen("setup"); say("Fresh start. The companion remembers nothing."); }}>Delete everything and start again</BigButton>
             </div>
@@ -886,6 +945,27 @@ export default function Winifred() {
             <strong style={{ fontSize: 15 }}>You're back.</strong>
             <p style={{ color: palette.inkDim, fontSize: 14, margin: "6px 0 10px", lineHeight: 1.5 }}>Nothing to catch up on and nothing to explain. The map kept your progress. Today is just today.</p>
             <BigButton tone="quiet" onClick={() => setWelcomeBack(false)} style={{ padding: "10px 14px", fontSize: 14 }}>Good to be back</BigButton>
+          </div>
+        )}
+
+        {whatsNew && (
+          <div style={{ ...card, marginTop: 12, borderColor: palette.line }}>
+            <strong style={{ fontSize: 15 }}>Updated to v{APP_VERSION}</strong>
+            <p style={{ color: palette.inkDim, fontSize: 14, margin: "6px 0 10px", lineHeight: 1.5 }}>{whatsNew}</p>
+            <BigButton tone="quiet" onClick={() => setWhatsNew(null)} style={{ padding: "10px 14px", fontSize: 14 }}>Right you are</BigButton>
+          </div>
+        )}
+
+        {updateReady && !updateSnoozed && !welcomeBack && (
+          <div style={{ ...card, marginTop: 12, borderColor: palette.line }}>
+            <strong style={{ fontSize: 15 }}>A new version is ready</strong>
+            <p style={{ color: palette.inkDim, fontSize: 14, margin: "6px 0 10px", lineHeight: 1.5 }}>
+              Nothing of yours moves: your logs, your season and your notes stay exactly where they are. It takes a second and you land back here.
+            </p>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              <BigButton tone="quiet" onClick={applyUpdate} style={{ padding: "10px 14px", fontSize: 14 }}>Update now</BigButton>
+              <BigButton tone="ghost" onClick={() => setUpdateSnoozed(true)} style={{ padding: "10px 14px", fontSize: 14 }}>Not now</BigButton>
+            </div>
           </div>
         )}
 
