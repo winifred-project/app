@@ -211,11 +211,18 @@ async function detectCapabilities() {
 function tierOptions(caps) {
   return [
     {
+      // Held back until WebLLM lands (AIW-6). Until then the download is
+      // simulated and the templated companion answers, so offering this
+      // tier would mean the app claiming something untrue about itself
+      // (P2). Phase 2 restores the real check, which is:
+      //   eligible: caps.webgpu && (caps.storageFreeGB === null || caps.storageFreeGB > 2)
       id: "local", title: "Full companion, fully private",
       line: "Downloads a small AI model to this device (about 1.4GB, one-off). Conversations never leave your phone.",
       where: "Everything stays on this device.",
-      eligible: caps.webgpu && (caps.storageFreeGB === null || caps.storageFreeGB > 2),
-      reason: !caps.webgpu ? "Needs WebGPU, which this browser doesn't expose." : "Needs about 2GB of free storage.",
+      eligible: false,
+      reason: !caps.webgpu
+        ? "Needs WebGPU, which this browser doesn't expose. It isn't finished either way."
+        : "Not switched on yet: the on-device model isn't finished. The simple companion below is real and works now.",
     },
     {
       id: "builtin", title: "Built-in browser AI",
