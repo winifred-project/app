@@ -108,15 +108,13 @@ function parseQuestJson(text) {
   if (!Array.isArray(arr)) throw new Error("not array");
   return arr.filter(questSafe).slice(0, 6);
 }
+// Cloud tier is not wired up in this build. It requires a server-side key
+// proxy (Phase 2) so that no API key, and no direct third-party request,
+// ever ships in client code (spec section 7, NFR-1). tierOptions() marks
+// the cloud tier ineligible, so this is unreachable; it throws so callers
+// fall back to the template pool (QST-3).
 async function cloudQuests(profile) {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1000, messages: [{ role: "user", content: questGenBrief(profile) }] }),
-  });
-  const data = await res.json();
-  const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
-  return parseQuestJson(text);
+  throw new Error("cloud tier requires the key proxy (Phase 2)");
 }
 async function builtinQuests(profile) {
   const LM = typeof window.LanguageModel !== "undefined" ? window.LanguageModel : window.ai && (window.ai.languageModel || window.ai.assistant);
@@ -258,23 +256,13 @@ The human's real data right now: ${context}
 Reply in character to their message.`;
 }
 
-// ---- Cloud tier (works inside the Claude artifact environment) ----
+// ---- Cloud tier (not enabled in this build) ----
+// Awaiting the Phase 2 key proxy; see cloudQuests above. companionBrief()
+// is kept intact because the proxy will send exactly that brief. Throwing
+// here makes the chat fall back to the template engine silently (CHT-2).
 async function cloudReply(name, context, history, userMsg) {
-  const messages = [
-    ...history.map((m) => ({ role: m.role, content: m.text })),
-    { role: "user", content: `${companionBrief(name, context)}\n\nHuman says: ${userMsg}` },
-  ];
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1000, messages }),
-  });
-  const data = await res.json();
-  const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
-  if (!text) throw new Error("empty");
-  return text;
+  throw new Error("cloud tier requires the key proxy (Phase 2)");
 }
-
 // ---- Built-in browser AI tier ----
 async function builtinReply(name, context, userMsg) {
   const LM = typeof window.LanguageModel !== "undefined" ? window.LanguageModel : window.ai && (window.ai.languageModel || window.ai.assistant);
