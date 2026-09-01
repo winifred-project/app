@@ -12,7 +12,18 @@
     <meta name="apple-mobile-web-app-title" content="Winifred" />
     <meta name="mobile-web-app-capable" content="yes" />
     <title>Winifred</title>
-    <style>body { margin: 0; background: #10191d; }</style>
+    <style>
+      html { background: #10191d; -webkit-text-size-adjust: 100%; }
+      body {
+        margin: 0;
+        background: #10191d;
+        min-height: 100dvh;
+        overscroll-behavior-y: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+      #root { min-height: 100dvh; }
+      button, input, textarea, select { font: inherit; }
+    </style>
   </head>
   <body>
     <div id="root"></div>

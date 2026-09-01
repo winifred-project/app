@@ -547,7 +547,7 @@ export default function Winifred() {
   }, [minuteTick]);
 
   if (!state) {
-    return <div style={{ minHeight: "100vh", background: palette.bg, color: palette.inkDim, display: "grid", placeItems: "center", fontFamily: "ui-rounded, 'SF Pro Rounded', 'Nunito', system-ui, sans-serif" }}>Lighting the lamp…</div>;
+    return <div style={{ minHeight: "100dvh", background: palette.bg, color: palette.inkDim, display: "grid", placeItems: "center", fontFamily: "ui-rounded, 'SF Pro Rounded', 'Nunito', system-ui, sans-serif" }}>Lighting the lamp…</div>;
   }
 
   // ----- derived -----
@@ -631,11 +631,16 @@ export default function Winifred() {
 
   const sky = skyFor(now);
   const shell = {
-    minHeight: "100vh",
+    minHeight: "100dvh",
     background: `radial-gradient(1200px 600px at 50% -10%, ${sky.top}, ${palette.bg}), radial-gradient(600px 300px at 80% 0%, ${sky.hint}, transparent)`,
     color: palette.ink,
     fontFamily: "ui-rounded, 'SF Pro Rounded', 'Nunito', 'Segoe UI', system-ui, sans-serif",
-    display: "flex", justifyContent: "center", padding: "24px 16px 48px",
+    display: "flex", justifyContent: "center",
+    // NFR-4 / Phase 1 iOS: keep content clear of the notch, status bar and home indicator
+    paddingTop: "calc(20px + env(safe-area-inset-top, 0px))",
+    paddingRight: "calc(16px + env(safe-area-inset-right, 0px))",
+    paddingBottom: "calc(48px + env(safe-area-inset-bottom, 0px))",
+    paddingLeft: "calc(16px + env(safe-area-inset-left, 0px))",
   };
   const card = { background: palette.panel, border: `1px solid ${palette.line}`, borderRadius: 18, padding: 18 };
 
@@ -690,7 +695,7 @@ export default function Winifred() {
           </p>
         </div>
         {toast && (
-          <div style={{ position: "fixed", left: "50%", bottom: 24, transform: "translateX(-50%)", background: "#0b1215", border: `1px solid ${palette.line}`, color: palette.ink, padding: "10px 16px", borderRadius: 12, fontSize: 14, maxWidth: 360, textAlign: "center", boxShadow: "0 6px 24px rgba(0,0,0,0.4)", zIndex: 50 }}>
+          <div style={{ position: "fixed", left: "50%", bottom: "calc(24px + env(safe-area-inset-bottom, 0px))", transform: "translateX(-50%)", background: "#0b1215", border: `1px solid ${palette.line}`, color: palette.ink, padding: "10px 16px", borderRadius: 12, fontSize: 14, maxWidth: 360, textAlign: "center", boxShadow: "0 6px 24px rgba(0,0,0,0.4)", zIndex: 50 }}>
             {toast}
           </div>
         )}
@@ -723,7 +728,7 @@ export default function Winifred() {
     return (
       <div style={shell}>
         <div style={{ width: "100%", maxWidth: 420 }}>
-          <button onClick={() => setScreen("home")} style={{ background: "none", border: "none", color: palette.inkDim, fontSize: 15, cursor: "pointer", padding: 0, fontFamily: "inherit" }}>← Back</button>
+          <button onClick={() => setScreen("home")} style={{ background: "none", border: "none", color: palette.inkDim, fontSize: 15, cursor: "pointer", padding: "10px 8px 10px 0", minHeight: 44, display: "inline-flex", alignItems: "center", fontFamily: "inherit" }}>← Back</button>
           <h2 style={{ fontSize: 22, fontWeight: 800 }}>Settings</h2>
           <div style={card}>
             <label style={{ fontSize: 14, color: palette.inkDim }}>Weekly unit budget: {state.budget}</label>
@@ -820,11 +825,11 @@ export default function Winifred() {
   return (
     <div style={shell}>
       <div style={{ width: "100%", maxWidth: 420 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", minHeight: 44, gap: 12 }}>
           <h1 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>Winifred</h1>
-          <div style={{ display: "flex", gap: 14, alignItems: "baseline" }}>
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
             {state.prestige > 0 && <span style={{ fontSize: 13, color: palette.accent }}>Rank {state.prestige}</span>}
-            <button onClick={() => setScreen("settings")} style={{ background: "none", border: "none", color: palette.inkDim, cursor: "pointer", fontSize: 14, fontFamily: "inherit", padding: 0 }}>Settings</button>
+            <button onClick={() => setScreen("settings")} aria-label="Settings" style={{ background: "none", border: "none", color: palette.inkDim, cursor: "pointer", fontSize: 14, fontFamily: "inherit", minHeight: 44, minWidth: 44, padding: "0 4px", display: "inline-flex", alignItems: "center", justifyContent: "flex-end", position: "relative", zIndex: 2 }}>Settings</button>
           </div>
         </div>
 
@@ -928,7 +933,7 @@ export default function Winifred() {
         </p>
 
         {toast && (
-          <div style={{ position: "fixed", left: "50%", bottom: 24, transform: "translateX(-50%)", background: "#0b1215", border: `1px solid ${palette.line}`, color: palette.ink, padding: "10px 16px", borderRadius: 12, fontSize: 14, maxWidth: 360, textAlign: "center", boxShadow: "0 6px 24px rgba(0,0,0,0.4)", zIndex: 50 }}>
+          <div style={{ position: "fixed", left: "50%", bottom: "calc(24px + env(safe-area-inset-bottom, 0px))", transform: "translateX(-50%)", background: "#0b1215", border: `1px solid ${palette.line}`, color: palette.ink, padding: "10px 16px", borderRadius: 12, fontSize: 14, maxWidth: 360, textAlign: "center", boxShadow: "0 6px 24px rgba(0,0,0,0.4)", zIndex: 50 }}>
             {toast}
           </div>
         )}
@@ -1291,8 +1296,8 @@ function ChatScreen({ shell, card, name, mood, tier, getReply, onBack }) {
 
   return (
     <div style={shell}>
-      <div style={{ width: "100%", maxWidth: 420, display: "flex", flexDirection: "column", minHeight: "80vh" }}>
-        <button onClick={onBack} style={{ background: "none", border: "none", color: palette.inkDim, fontSize: 15, cursor: "pointer", padding: 0, fontFamily: "inherit", alignSelf: "flex-start" }}>← Back</button>
+      <div style={{ width: "100%", maxWidth: 420, display: "flex", flexDirection: "column", minHeight: "70dvh" }}>
+        <button onClick={onBack} style={{ background: "none", border: "none", color: palette.inkDim, fontSize: 15, cursor: "pointer", padding: "10px 8px 10px 0", minHeight: 44, display: "inline-flex", alignItems: "center", fontFamily: "inherit", alignSelf: "flex-start" }}>← Back</button>
         <div style={{ textAlign: "center" }}><Companion mood={mood} size={110} /></div>
         <p style={{ textAlign: "center", fontSize: 12, color: palette.inkDim, margin: "0 0 6px" }}>{privacyLine}</p>
         <div style={{ ...card, flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10 }}>
@@ -1449,7 +1454,7 @@ function RecapScreen({ shell, card, state, dryDays, xp, seasonCravings, seasonDa
   return (
     <div style={shell}>
       <div style={{ width: "100%", maxWidth: 420 }}>
-        <button onClick={onBack} style={{ background: "none", border: "none", color: palette.inkDim, fontSize: 15, cursor: "pointer", padding: 0, fontFamily: "inherit" }}>← Back</button>
+        <button onClick={onBack} style={{ background: "none", border: "none", color: palette.inkDim, fontSize: 15, cursor: "pointer", padding: "10px 8px 10px 0", minHeight: 44, display: "inline-flex", alignItems: "center", fontFamily: "inherit" }}>← Back</button>
         <h2 style={{ fontSize: 24, fontWeight: 800, marginBottom: 2 }}>Season so far</h2>
         <p style={{ color: palette.inkDim, marginTop: 0, fontSize: 14 }}>Day {seasonDayNum} of 28 · Rank {state.prestige}</p>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
