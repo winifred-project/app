@@ -122,6 +122,9 @@ const defaultState = {
   lastOpen: null,
   lastSeenNote: null,
   ai: { tier: null, cloudConsent: false, modelDownloaded: false },
+  // CMP-7a. Off is the only acceptable default: it is the setting that costs a
+  // system permission prompt, and nothing in the app is worse for it being off.
+  motion: { tilt: false },
 };
 
 function dayKey(t) { return new Date(t - 5 * HOUR).toDateString(); }
@@ -340,6 +343,7 @@ async function loadState() {
         ...defaultState, ...parsed,
         ai: { ...defaultState.ai, ...(parsed.ai || {}) },
         show: { ...defaultState.show, ...(parsed.show || {}) },
+        motion: { ...defaultState.motion, ...(parsed.motion || {}) },
         // Pre-chip-row saves: no type was ever chosen, so tick nothing rather than
         // inheriting the fresh-install default and mislabelling their own drinks (DRK-7).
         drinkTypes: Array.isArray(parsed.drinkTypes) ? parsed.drinkTypes : [],
@@ -551,10 +555,14 @@ const moodCopy = {
 // one running all day. So every idle tempo below sits well outside the range a
 // person would entrain to: this is a lamp flame living, not a breath to follow.
 const MOOD_MOTION = {
-  thriving: { dur: "9.5s", scale: 1.035, rise: "-2px",   glowLo: 0.8,  sway: "2.2px", swayDur: "17s", gaze: 1 },
-  steady:   { dur: "11s",  scale: 1.028, rise: "-1.6px", glowLo: 0.85, sway: "1.8px", swayDur: "19s", gaze: 0.85 },
-  tired:    { dur: "13s",  scale: 1.02,  rise: "-1.1px", glowLo: 0.89, sway: "1.2px", swayDur: "23s", gaze: 0.6 },
-  rough:    { dur: "15s",  scale: 1.014, rise: "-0.7px", glowLo: 0.93, sway: "0.8px", swayDur: "27s", gaze: 0.4 },
+  thriving: { dur: "9.5s", scale: 1.035, rise: "-2px",   glowLo: 0.8,  sway: "2.2px", swayDur: "17s", gaze: 1,
+              wanderX: "2.6px", wanderY: "1.6px", wanderDur: "31s", glanceX: "2.4px", glanceY: "1.4px", glanceDur: "19s" },
+  steady:   { dur: "11s",  scale: 1.028, rise: "-1.6px", glowLo: 0.85, sway: "1.8px", swayDur: "19s", gaze: 0.85,
+              wanderX: "2.1px", wanderY: "1.3px", wanderDur: "37s", glanceX: "2px",   glanceY: "1.2px", glanceDur: "23s" },
+  tired:    { dur: "13s",  scale: 1.02,  rise: "-1.1px", glowLo: 0.89, sway: "1.2px", swayDur: "23s", gaze: 0.6,
+              wanderX: "1.4px", wanderY: "0.9px", wanderDur: "43s", glanceX: "1.3px", glanceY: "0.8px", glanceDur: "29s" },
+  rough:    { dur: "15s",  scale: 1.014, rise: "-0.7px", glowLo: 0.93, sway: "0.8px", swayDur: "27s", gaze: 0.4,
+              wanderX: "0.9px", wanderY: "0.6px", wanderDur: "53s", glanceX: "0.8px", glanceY: "0.5px", glanceDur: "37s" },
 };
 
 // NFR-9. Read live rather than once, because iOS exposes the setting as a
@@ -578,10 +586,13 @@ function usePrefersReducedMotion() {
 }
 
 // CMP-7: where the user's finger or pointer is, as -1..1 from the centre of the
-// viewport. Deliberately not device orientation: that needs a system permission
-// prompt on iOS, and spending the user's trust on a motion-sensor dialogue in an
-// app whose entire promise is that nothing leaves the device is a bad trade
-// (P1, P3). Touch position gives most of the same aliveness for nothing.
+// viewport. This is the always-on input and needs no permission, but note what it
+// cannot do: touch position only exists while a finger is actually on the glass.
+// On a desktop the pointer is always somewhere and the gaze is continuous; on a
+// phone the user taps rather than drags, so this fires for a fraction of a second
+// during a scroll and is otherwise invisible. That is why CMP-8's wander exists
+// and why CMP-7a offers tilt: on the device the app is actually for, this alone
+// left the companion inert.
 //
 // Coalesced onto one animation frame, so a fast drag causes one React render
 // per frame rather than one per pointer event.
@@ -621,22 +632,164 @@ function useGaze(enabled) {
   return gaze;
 }
 
-function Companion({ mood, size = 180 }) {
+// CMP-7a: device orientation, off by default and only ever switched on from
+// Settings. The rejection recorded in v1.8 was reversed on evidence: the user
+// tried moving the phone, nothing happened, and CMP-7 alone turned out to be
+// close to a no-op on the primary device. The privacy reasoning still holds, so
+// the shape of the concession matters: the permission prompt fires from the
+// toggle's own tap and never at first run, the reading never leaves the device,
+// and nothing about the app degrades with it off.
+//
+// Neutral is calibrated from the first reading rather than assumed, because
+// there is no correct hold angle: a phone flat on a desk and a phone held up in
+// bed are both "not tilted" to the person holding them.
+const TILT_RANGE = 26; // degrees of tilt for full deflection
+
+function useTilt(enabled) {
+  const [tilt, setTilt] = useState({ x: 0, y: 0 });
+  useEffect(() => {
+    if (!enabled) { setTilt({ x: 0, y: 0 }); return; }
+    let frame = 0;
+    let latest = null;
+    let origin = null;
+    const flush = () => { frame = 0; if (latest) setTilt(latest); };
+    const onTilt = (e) => {
+      if (e.gamma == null || e.beta == null) return;
+      if (!origin) origin = { g: e.gamma, b: e.beta };
+      const clamp = (v) => Math.max(-1, Math.min(1, v));
+      latest = {
+        x: clamp((e.gamma - origin.g) / TILT_RANGE),
+        y: clamp((e.beta - origin.b) / TILT_RANGE),
+      };
+      if (!frame) frame = requestAnimationFrame(flush);
+    };
+    window.addEventListener("deviceorientation", onTilt, { passive: true });
+    return () => {
+      window.removeEventListener("deviceorientation", onTilt);
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [enabled]);
+  return tilt;
+}
+
+// Asking for the sensor. Returns a plain result the caller turns into copy,
+// because every one of these outcomes is real on a phone and a toggle that
+// says "on" while nothing happens would be a lie the size of P2.
+//   granted | denied | unsupported | silent  (permission given, no readings)
+async function requestTilt() {
+  if (typeof window === "undefined" || typeof DeviceOrientationEvent === "undefined") return "unsupported";
+  const DOE = DeviceOrientationEvent;
+  if (typeof DOE.requestPermission === "function") {
+    // iOS. In an installed standalone PWA this prompt has a history of never
+    // appearing at all, so a hang is treated as a no rather than left pending.
+    let res;
+    try {
+      res = await Promise.race([
+        DOE.requestPermission(),
+        new Promise((r) => setTimeout(() => r("timeout"), 8000)),
+      ]);
+    } catch (e) { return "denied"; }
+    if (res !== "granted") return res === "timeout" ? "unsupported" : "denied";
+  }
+  // Permission is not the same as a sensor. Confirm a reading actually arrives.
+  return await new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => {
+      if (done) return;
+      done = true;
+      window.removeEventListener("deviceorientation", probe);
+      clearTimeout(timer);
+      resolve(v);
+    };
+    const probe = (e) => { if (e.gamma != null || e.beta != null) finish("granted"); };
+    const timer = setTimeout(() => finish("silent"), 2000);
+    window.addEventListener("deviceorientation", probe, { passive: true });
+  });
+}
+
+// CMP-7a. A toggle that reports what actually happened. Every branch here is a
+// real outcome on a real phone: the prompt can be declined, it can never appear
+// at all in an installed PWA, and a device can grant permission while having no
+// sensor to report from. A switch left sitting on "on" while nothing moves would
+// be a small lie, and P2 does not have a size exemption.
+//
+// The outcome is written inline rather than sent to the toast, for two reasons:
+// the Settings screen has no toast to send it to, and a permission refusal is
+// exactly the kind of message that should still be on screen when the user looks
+// back at the control wondering why it turned itself off.
+const TILT_STATUS = {
+  on: { tone: "ok", text: "On. Move the phone and she'll follow." },
+  off: { tone: "dim", text: "Off. She still looks about on her own." },
+  denied: { tone: "dim", text: "Motion access was declined, so this stays off. Nothing else changes, and you can allow it later in your browser settings." },
+  silent: { tone: "dim", text: "Your device allowed it but isn't reporting any movement, so this stays off." },
+  unsupported: { tone: "dim", text: "This device doesn't offer motion to web apps, so this stays off. She looks about on her own either way." },
+};
+
+function TiltToggle({ on, onChange }) {
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState(null);
+  async function flip(next) {
+    if (!next) { onChange(false); setStatus("off"); return; }
+    setBusy(true);
+    const result = await requestTilt();
+    setBusy(false);
+    onChange(result === "granted");
+    setStatus(result === "granted" ? "on" : result);
+  }
+  const shown = status || (on ? "on" : null);
+  const note = shown ? TILT_STATUS[shown] : null;
+  return (
+    <div style={{ marginTop: 18, paddingTop: 14, borderTop: `1px solid ${palette.line}` }}>
+      <label style={{ display: "flex", gap: 10, alignItems: "flex-start", cursor: busy ? "wait" : "pointer", fontSize: 14 }}>
+        <input
+          type="checkbox"
+          checked={on}
+          disabled={busy}
+          onChange={(e) => flip(e.target.checked)}
+          style={{ marginTop: 3, accentColor: palette.bar }}
+        />
+        <span>
+          <strong style={{ fontSize: 15, color: palette.ink, display: "block" }}>
+            {busy ? "Asking…" : "Follow the phone as you move it"}
+          </strong>
+          <span style={{ color: palette.inkDim, lineHeight: 1.5, display: "block", marginTop: 2 }}>
+            Uses your phone's tilt sensor, which needs a one-off permission. The reading never leaves this device and is never stored. Off by default, and she looks about on her own either way.
+          </span>
+        </span>
+      </label>
+      {note && (
+        <p role="status" style={{ margin: "8px 0 0 28px", fontSize: 13.5, lineHeight: 1.5, color: note.tone === "ok" ? palette.accent : palette.inkDim }}>
+          {note.text}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function Companion({ mood, size = 180, tiltEnabled = false }) {
   const glowOpacity = { thriving: 0.95, steady: 0.65, tired: 0.3, rough: 0.12 }[mood];
   const bodyLift = { thriving: 0, steady: 3, tired: 8, rough: 12 }[mood];
   const motion = MOOD_MOTION[mood];
   const reduced = usePrefersReducedMotion();
   const gaze = useGaze(!reduced);
+  const tilt = useTilt(tiltEnabled && !reduced);
+  // The two inputs add rather than compete. Tilt is the ambient one and touch is
+  // the deliberate one, so touch is weighted heavier: a finger on the glass
+  // should win over how the phone happens to be held.
+  const look = {
+    x: Math.max(-1, Math.min(1, gaze.x + tilt.x * 0.75)),
+    y: Math.max(-1, Math.min(1, gaze.y + tilt.y * 0.75)),
+  };
   // Offsets are SVG user units against a 140-wide viewBox, so they scale with
   // the rendered size on their own. Small on purpose: this should register as
   // attention, not as a character sliding about the screen.
   const g = motion.gaze;
-  const bodyX = gaze.x * 3.4 * g, bodyY = gaze.y * 2.2 * g;
-  const eyeX = gaze.x * 1.8 * g, eyeY = gaze.y * 1.2 * g;
+  const bodyX = look.x * 3.4 * g, bodyY = look.y * 2.2 * g;
+  const eyeX = look.x * 1.8 * g, eyeY = look.y * 1.2 * g;
   // Counter-motion on the glow: it sits behind the body, so shifting it the
   // other way is what sells the depth and makes the lamp read as turning
   // towards you rather than sliding.
-  const glowX = -gaze.x * 1.2 * g, glowY = -gaze.y * 0.8 * g;
+  const glowX = -look.x * 1.2 * g, glowY = -look.y * 0.8 * g;
   const eyes =
     mood === "thriving" ? (
       <>
@@ -682,6 +835,12 @@ function Companion({ mood, size = 180 }) {
     "--wf-sway": motion.sway,
     "--wf-sway-dur": motion.swayDur,
     "--wf-shadow-scale": 0.94,
+    "--wf-wander-x": motion.wanderX,
+    "--wf-wander-y": motion.wanderY,
+    "--wf-wander-dur": motion.wanderDur,
+    "--wf-glance-x": motion.glanceX,
+    "--wf-glance-y": motion.glanceY,
+    "--wf-glance-dur": motion.glanceDur,
   };
   return (
     <svg
@@ -700,18 +859,22 @@ function Companion({ mood, size = 180 }) {
       </g>
       <g transform={`translate(0 ${bodyLift})`}>
         <g className="wf-sway">
-          <g className="wf-parallax" style={{ transform: `translate(${bodyX}px, ${bodyY}px)` }}>
-            <g className="wf-breathe">
-              <ellipse cx="70" cy="74" rx="34" ry="30" fill="#e9d9ae" />
-              <ellipse cx="70" cy="74" rx="34" ry="30" fill={palette.glow} opacity={glowOpacity * 0.5} />
-              <g className="wf-gaze" style={{ transform: `translate(${eyeX}px, ${eyeY}px)` }}>
-                {eyes}
+          <g className="wf-wander">
+            <g className="wf-parallax" style={{ transform: `translate(${bodyX}px, ${bodyY}px)` }}>
+              <g className="wf-breathe">
+                <ellipse cx="70" cy="74" rx="34" ry="30" fill="#e9d9ae" />
+                <ellipse cx="70" cy="74" rx="34" ry="30" fill={palette.glow} opacity={glowOpacity * 0.5} />
+                <g className="wf-glance">
+                  <g className="wf-gaze" style={{ transform: `translate(${eyeX}px, ${eyeY}px)` }}>
+                    {eyes}
+                  </g>
+                </g>
+                {mood === "thriving" && <path d="M62 74 q8 7 16 0" stroke="#10191d" strokeWidth="3" fill="none" strokeLinecap="round" />}
+                {mood === "steady" && <path d="M63 75 q7 4 14 0" stroke="#10191d" strokeWidth="3" fill="none" strokeLinecap="round" />}
+                {mood === "tired" && <line x1="64" y1="76" x2="76" y2="76" stroke="#10191d" strokeWidth="3" strokeLinecap="round" />}
+                {mood === "rough" && <path d="M63 78 q7 -4 14 0" stroke="#10191d" strokeWidth="3" fill="none" strokeLinecap="round" />}
+                {sprout}
               </g>
-              {mood === "thriving" && <path d="M62 74 q8 7 16 0" stroke="#10191d" strokeWidth="3" fill="none" strokeLinecap="round" />}
-              {mood === "steady" && <path d="M63 75 q7 4 14 0" stroke="#10191d" strokeWidth="3" fill="none" strokeLinecap="round" />}
-              {mood === "tired" && <line x1="64" y1="76" x2="76" y2="76" stroke="#10191d" strokeWidth="3" strokeLinecap="round" />}
-              {mood === "rough" && <path d="M63 78 q7 -4 14 0" stroke="#10191d" strokeWidth="3" fill="none" strokeLinecap="round" />}
-              {sprout}
             </g>
           </g>
         </g>
@@ -1125,7 +1288,7 @@ export default function Winifred() {
 
   // ----- chat -----
   if (screen === "chat") {
-    return <ChatScreen shell={shell} card={card} name={state.companionName} mood={mood} tier={state.ai.tier} getReply={getReply} onBack={() => setScreen("home")} />;
+    return <ChatScreen shell={shell} card={card} name={state.companionName} mood={mood} tier={state.ai.tier} getReply={getReply} onBack={() => setScreen("home")} tiltEnabled={state.motion.tilt} />;
   }
 
   // ----- recap -----
@@ -1171,6 +1334,10 @@ export default function Winifred() {
                 Show money
               </label>
             </div>
+            <TiltToggle
+              on={state.motion.tilt}
+              onChange={(tilt) => update((prev) => ({ ...prev, motion: { ...prev.motion, tilt } }))}
+            />
             <div style={{ marginTop: 18 }}>
               <DrinkEditor drinks={state.drinks} onChange={(drinks) => update({ drinks })} say={say} types={state.drinkTypes || []} onTypes={(drinkTypes, drinks) => update({ drinkTypes, drinks })} />
             </div>
@@ -1226,6 +1393,7 @@ export default function Winifred() {
                         ...parsed,
                         ai: { ...defaultState.ai, ...(parsed.ai || {}) },
                         show: { ...defaultState.show, ...(parsed.show || {}) },
+                        motion: { ...defaultState.motion, ...(parsed.motion || {}) },
                         drinkTypes: Array.isArray(parsed.drinkTypes) ? parsed.drinkTypes : [],
                         onboarded: true,
                         lastOpen: Date.now(),
@@ -1327,7 +1495,7 @@ export default function Winifred() {
           </div>
         )}
 
-        <Companion mood={mood} />
+        <Companion mood={mood} tiltEnabled={state.motion.tilt} />
         <p style={{ textAlign: "center", color: palette.inkDim, fontSize: 14.5, marginTop: -4, lineHeight: 1.5 }}>{moodCopy[mood](state.companionName)}</p>
         <div style={{ textAlign: "center", marginTop: 2 }}>
           <button onClick={() => setScreen("chat")} style={{ background: "none", border: `1px solid ${palette.line}`, color: palette.bar, borderRadius: 999, padding: "7px 16px", fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>
@@ -1958,7 +2126,7 @@ function PredictionCard({ budget, onLock }) {
   );
 }
 
-function ChatScreen({ shell, card, name, mood, tier, getReply, onBack }) {
+function ChatScreen({ shell, card, name, mood, tier, getReply, onBack, tiltEnabled }) {
   const [history, setHistory] = useState([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1982,7 +2150,7 @@ function ChatScreen({ shell, card, name, mood, tier, getReply, onBack }) {
     <div style={shell}>
       <div style={{ width: "100%", maxWidth: 420, display: "flex", flexDirection: "column", minHeight: "70dvh" }}>
         <button onClick={onBack} style={{ background: "none", border: "none", color: palette.inkDim, fontSize: 15, cursor: "pointer", padding: "10px 8px 10px 0", minHeight: 44, display: "inline-flex", alignItems: "center", fontFamily: "inherit", alignSelf: "flex-start" }}>← Back</button>
-        <div style={{ textAlign: "center" }}><Companion mood={mood} size={110} /></div>
+        <div style={{ textAlign: "center" }}><Companion mood={mood} size={110} tiltEnabled={tiltEnabled} /></div>
         <p style={{ textAlign: "center", fontSize: 12, color: palette.inkDim, margin: "0 0 6px" }}>{privacyLine}</p>
         <div style={{ ...card, flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10 }}>
           {history.length === 0 && (
