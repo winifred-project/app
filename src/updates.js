@@ -17,8 +17,10 @@ import { registerSW } from "virtual:pwa-register";
 
 const CHECK_INTERVAL = 60 * 60 * 1000;
 
-// Injected by Vite from package.json (see vite.config.js).
-export const APP_VERSION = __APP_VERSION__;
+// Injected by Vite at build time (see vite.config.js): the short commit hash
+// the build came from, and the day it was built.
+export const BUILD_ID = __BUILD_ID__;
+export const BUILD_DATE = __BUILD_DATE__;
 
 let updateSW = null; // returned by registerSW; call with true to apply and reload
 let registration = null;

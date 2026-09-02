@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { APP_VERSION, isUpdateReady, onUpdateReady, checkForUpdate, applyUpdate } from "./updates.js";
+import { BUILD_ID, BUILD_DATE, isUpdateReady, onUpdateReady, checkForUpdate, applyUpdate } from "./updates.js";
 
 // Winifred v3: adds the AI setup wizard and trust layer.
 // New in v3: device capability detection, AI tier chooser (local / built-in /
@@ -88,11 +88,13 @@ function seedDrinks(typeId) {
   return t.seeds.map((d) => ({ ...d, units: unitsFrom(d.ml, d.abv), seed: typeId }));
 }
 
-// One short, plain line per release, shown once after the app has updated
-// itself. It is a note from the companion, not a changelog (P6). A version
-// with no entry here says nothing at all, which is the right default.
-const RELEASE_NOTES = {
-  "0.4.0": "I now look for my own updates when you come back to me, and Settings will tell you which version you're on.",
+// One short, plain line shown once when a release is worth a word. It is a
+// note from the companion, not a changelog (P6). Most releases say nothing:
+// leave `text` empty for those. Give `id` a new value when you want a new
+// note to appear; anyone who has already seen that id will not see it twice.
+const RELEASE_NOTE = {
+  id: "self-updating",
+  text: "I now look for my own updates when you come back to me, and Settings will tell you which build you're on.",
 };
 
 const defaultState = {
@@ -118,7 +120,7 @@ const defaultState = {
   profile: "",
   predictions: [],
   lastOpen: null,
-  lastSeenVersion: null,
+  lastSeenNote: null,
   ai: { tier: null, cloudConsent: false, modelDownloaded: false },
 };
 
@@ -557,10 +559,10 @@ export default function Winifred() {
       s.lastOpen = Date.now();
       // Shown once after an update, and only to someone who was already
       // running an earlier build: a fresh install has nothing to catch up on.
-      // Someone already onboarded but with no version recorded was, by
-      // definition, running a build from before this field existed.
-      const previousVersion = s.lastSeenVersion || (s.onboarded ? "pre-0.4.0" : null);
-      s.lastSeenVersion = APP_VERSION;
+      // Whatever the current note is, it counts as seen from here on, so a
+      // fresh install never meets a note about a change it never lived through.
+      const seenNote = s.lastSeenNote;
+      s.lastSeenNote = RELEASE_NOTE.id;
       const scored = scorePredictions(s);
       setState(scored.state);
       saveState(scored.state);
@@ -568,8 +570,8 @@ export default function Winifred() {
       else if (!s.ai.tier) setScreen("ai");
       if (away) setWelcomeBack(true);
       if (shouldOfferIosInstall()) setIosInstall(true);
-      if (previousVersion && previousVersion !== APP_VERSION && RELEASE_NOTES[APP_VERSION]) {
-        setWhatsNew(RELEASE_NOTES[APP_VERSION]);
+      if (s.onboarded && RELEASE_NOTE.text && seenNote !== RELEASE_NOTE.id) {
+        setWhatsNew(RELEASE_NOTE.text);
       }
       if (scored.message) say(scored.message);
     });
@@ -591,7 +593,7 @@ export default function Winifred() {
     } else if (result === "unavailable") {
       say("Nothing to check here. Add me to your home screen and I'll keep myself current.");
     } else {
-      say(`You're on the latest version (v${APP_VERSION}).`);
+      say(`You're on the latest build (${BUILD_ID}).`);
     }
   }
 
@@ -904,10 +906,11 @@ export default function Winifred() {
               />
             </div>
             <div style={{ marginTop: 18, paddingTop: 14, borderTop: `1px solid ${palette.line}` }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 14, color: palette.inkDim }}>
-                <span>Version {APP_VERSION}</span>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, fontSize: 14, color: palette.inkDim }}>
+                <span>Build {BUILD_ID}</span>
                 {updateReady && <span style={{ color: palette.accent }}>new version ready</span>}
               </div>
+              <div style={{ fontSize: 12, color: palette.inkDim, marginTop: 2, opacity: 0.8 }}>Published {BUILD_DATE}</div>
               <div style={{ marginTop: 10 }}>
                 <BigButton tone="ghost" disabled={checkingUpdate} onClick={runUpdateCheck}>{checkingUpdate ? "Checking\u2026" : "Check for updates"}</BigButton>
               </div>
@@ -950,7 +953,7 @@ export default function Winifred() {
 
         {whatsNew && (
           <div style={{ ...card, marginTop: 12, borderColor: palette.line }}>
-            <strong style={{ fontSize: 15 }}>Updated to v{APP_VERSION}</strong>
+            <strong style={{ fontSize: 15 }}>Freshly updated</strong>
             <p style={{ color: palette.inkDim, fontSize: 14, margin: "6px 0 10px", lineHeight: 1.5 }}>{whatsNew}</p>
             <BigButton tone="quiet" onClick={() => setWhatsNew(null)} style={{ padding: "10px 14px", fontSize: 14 }}>Right you are</BigButton>
           </div>

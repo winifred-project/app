@@ -30,9 +30,17 @@ must be set to **GitHub Actions**.
 
 ### Releasing (UPD-1 to UPD-5)
 
-Bump `version` in `package.json` before you push. That number is injected as
-`__APP_VERSION__`, shown in Settings, and is the thing to ask someone for
-when a bug report is vague.
+There is no version number to bump. A build identifies itself by the commit
+it was built from, injected as `__BUILD_ID__` and shown in Settings as
+`Build 62afb1c` with the date it was published. On GitHub Actions that comes
+from `GITHUB_SHA`; locally it comes from `git rev-parse`, with a trailing
+`+` when the working tree is dirty, because a build with uncommitted changes
+is not the commit it claims to be. Ask for that string when a bug report is
+vague: it points at an exact tree.
+
+Whether a new build exists is not decided by that label. The service worker
+compares its own precache manifest, which changes whenever any asset does,
+so pushing to `main` is the whole release process.
 
 Because the shell is precached, a home-screen launch never touches the
 server, and on iOS the app is resumed rather than reloaded. Nothing would
@@ -46,9 +54,10 @@ the middle of a craving encounter (P1). A waiting build is offered on the
 home screen only, is dismissible, and applies itself at the next cold start
 if the offer is ignored. Stored state is untouched either way (DAT-1).
 
-To say something about a release, add one line to `RELEASE_NOTES` in
-`src/App.jsx`, keyed by version. It shows once, and only to someone who was
-already running an earlier build. A version with no entry says nothing.
+To say something about a release, edit `RELEASE_NOTE` in `src/App.jsx`: put
+one line in `text` and give `id` a new value. It shows once per id, and
+never to someone who has not finished onboarding. Most releases have nothing
+to say, so most of the time `text` stays empty and the app stays quiet.
 
 ### Before attaching a custom domain
 
