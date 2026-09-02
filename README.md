@@ -6,11 +6,25 @@ STATUS: DRAFT - UNREVIEWED
 A quiet game about drinking a little less: a privacy-first, installable PWA
 that keeps every piece of personal data on the device it runs on.
 
-Built to `winifred-spec.md` (spec v1.1). Requirement IDs from that document
+Built to `winifred-spec.md` (spec v1.4). Requirement IDs from that document
 are referenced in commit messages and in the code where behaviour is not
 self-evident.
 
 Vite + React, no runtime dependencies beyond React, one component.
+
+## Tests
+
+```
+npm test
+```
+
+A zero-dependency harness (`test/winifred.test.mjs`). It lifts the pure helpers
+and the safety regexes straight out of `src/App.jsx` by text, so the tests
+exercise the shipped patterns rather than a copy that can drift. It covers the
+capacity regeneration and debt floor (BAR-4, BAR-5) including the 05:00 day
+boundary and a British Summer Time transition, the chat safety screens (CHT-5,
+CHT-6), the quest filter (QST-3), the BAR-6 copy constraint, and the DRK-10
+wiring. Re-run it after any change to chat, quests or copy (R-5).
 
 ## Deploying
 

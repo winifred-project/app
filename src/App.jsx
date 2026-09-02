@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import { BUILD_ID, BUILD_DATE, isUpdateReady, onUpdateReady, checkForUpdate, applyUpdate } from "./updates.js";
 
 // Winifred v3: adds the AI setup wizard and trust layer.
@@ -132,10 +132,108 @@ function weekStart(now) {
   monday.setHours(0, 0, 0, 0);
   return monday.getTime() + 5 * HOUR;
 }
+// Mutators still rotate on calendar weeks (MUT-1); the health bar no longer does.
 function weekIndex(now) { return Math.floor(weekStart(now) / (7 * DAY)); }
 
+// BAR-4: the day boundary sits at 05:00 local, so a 1am drink belongs to the
+// night before. Computed from the local date rather than by dividing epoch ms,
+// so the boundary holds across a DST change (matches dayKey).
+function dayStart(t) {
+  const d = new Date(t - 5 * HOUR);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime() + 5 * HOUR;
+}
+function addDays(boundaryMs, n) {
+  const d = new Date(boundaryMs - 5 * HOUR);
+  d.setDate(d.getDate() + n);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime() + 5 * HOUR;
+}
+function dayLabel(boundaryMs, now) {
+  const today = dayStart(now);
+  if (boundaryMs === today) return "Today";
+  if (boundaryMs === addDays(today, -1)) return "Yesterday";
+  return new Date(boundaryMs).toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "short" });
+}
+
+// BAR-4/BAR-5: capacity is a regenerating pool, not a calendar reset. It refills
+// by budget/7 at each 05:00 boundary, capped at the full budget so headroom cannot
+// be stockpiled for a blowout, and floored at one budget of debt so a heavy stretch
+// stays visible for days without ever becoming unrecoverable.
+const REGEN_DAYS = 7;
+function regenPerDay(budget) { return budget / REGEN_DAYS; }
+
+// BAR-7: the CMO guidance does not stop at fourteen a week. It adds "if you
+// regularly drink as much as 14 units per week, it is best to spread your
+// drinking evenly over 3 or more days", and warns that one or two heavy episodes
+// a week raise long-term and injury risk on their own. A pool that only counts
+// weekly load cannot tell one Saturday from a spread week, so concentration
+// carries its own cost: a day holding three or more days' worth of the budget
+// forfeits the next morning's refill.
+//
+// The threshold is deliberately budget-relative arithmetic, not a clinical
+// figure. At the default budget it lands on 6 units, which is where the usual
+// binge definition and the CMOs' 5-7 unit injury band sit, but it is expressed
+// as "three days' worth" so that no surface has to make a claim about a body
+// (BAR-6) and so that nothing needs to know the user's sex.
+function concentrationThreshold(budget) { return 3 * regenPerDay(budget); }
+
+function unitsByDay(logs) {
+  const m = new Map();
+  for (const l of logs) {
+    const k = dayStart(l.t);
+    m.set(k, (m.get(k) || 0) + l.units);
+  }
+  return m;
+}
+
+// Walks day by day from the first ever log so the cap, the floor and the
+// forfeited refills clamp in the right order; a closed form cannot express
+// "capped at each step". Returns the whole timeline because the log screen
+// (DRK-10) must show figures that agree with the bar exactly, which means
+// reading them from the same walk rather than recomputing them.
+function capacityTimeline(logs, budget, now) {
+  const cap = budget, floor = -budget, regen = regenPerDay(budget);
+  const thresh = concentrationThreshold(budget);
+  const today = dayStart(now);
+  const out = [];
+  if (!logs.length) return out;
+  const perDay = unitsByDay(logs);
+  let cur = dayStart(Math.min(...logs.map((l) => l.t)));
+  if (cur > today) cur = today;
+  let level = cap, first = true, prevConcentrated = false, guard = 0;
+  while (cur <= today && guard++ < 4000) {
+    const paused = !first && prevConcentrated;
+    const refill = first || paused ? 0 : Math.max(0, Math.min(regen, cap - level));
+    level = Math.min(cap, level + refill);
+    const drunk = perDay.get(cur) || 0;
+    if (drunk) level = Math.max(floor, level - drunk);
+    const concentrated = drunk >= thresh;
+    out.push({ t: cur, refill, drunk, after: level, concentrated, paused });
+    prevConcentrated = concentrated;
+    first = false;
+    cur = addDays(cur, 1);
+  }
+  return out;
+}
+
+function capacityAt(logs, budget, now) {
+  const tl = capacityTimeline(logs, budget, now);
+  return tl.length ? tl[tl.length - 1].after : budget;
+}
+
+// Whether today's total has already forfeited tomorrow's refill (BAR-7).
+function refillPausedTomorrow(logs, budget, now) {
+  const today = (unitsByDay(logs).get(dayStart(now)) || 0);
+  return today >= concentrationThreshold(budget);
+}
+
 // ---- Quest generation from the user's life ----
-const QUEST_BAN_RE = /(drink|alcohol|pub|bar\b|wine|beer|booze|pint|off-licence|liquor|drive|knife|ladder|roof)/i;
+// QST-3: rejects alcohol-adjacent content, driving, blades and heights. "knife"
+// alone let "sharpen the kitchen knives" through, so blades are matched by family
+// rather than by one spelling; over-blocking is cheap here, since a rejected
+// suggestion simply falls back to the template pool.
+const QUEST_BAN_RE = /(drink|alcohol|pub|bar\b|wine|beer|booze|pint|off-licence|liquor|drive|kni(?:fe|ves)|blade|scissor|cleaver|axe\b|hatchet|razor|machete|(?:chain|hack|hand)saw|ladder|roof|scaffold|gutter|balcon)/i;
 function questSafe(q) {
   return typeof q === "string" && q.trim().length > 5 && q.length <= 120 && !QUEST_BAN_RE.test(q);
 }
@@ -196,6 +294,13 @@ async function builtinQuests(profile) {
   return parseQuestJson(await session.prompt(questGenBrief(profile)));
 }
 
+// SSN-2: XP is the only input to the map. 20 XP a region is tuned against a
+// realistic season for an app about drinking less rather than stopping: ~18 dry
+// days, 10 cravings beaten and a little bonus clears about 24 of 28, so a full
+// Reach is an achievement rather than the default. Driving the fog from XP rather
+// than from raw day/craving counts is what makes Steady Flame and Night Watch
+// (MUT-1) do something a user can see; before this they moved a number nothing read.
+const XP_PER_REGION = 20;
 const MUTATORS = [
   { name: "Steady Flame", desc: "Dry days are worth 20 XP this week instead of 10.", dryXP: 20, cravingXP: 25, lateCravingXP: 25, questBonus: 0, blind: false },
   { name: "Night Watch", desc: "Cravings beaten after 8pm are worth 40 XP this week.", dryXP: 10, cravingXP: 25, lateCravingXP: 40, questBonus: 0, blind: false },
@@ -203,6 +308,15 @@ const MUTATORS = [
   { name: "Quartermaster", desc: "Every quest completed this week earns +15 bonus XP.", dryXP: 10, cravingXP: 25, lateCravingXP: 25, questBonus: 15, blind: false },
 ];
 function mutatorFor(now) { return MUTATORS[weekIndex(now) % MUTATORS.length]; }
+
+// SSN-1 / SSN-2: season scoring, kept pure and at module scope so the harness
+// can exercise the shipped maths rather than re-implementing it (R-5).
+function seasonXP({ dryDays, cravings, bonus, mutator }) {
+  const fromCravings = cravings.reduce(
+    (a, c) => a + (c.late && mutator.lateCravingXP > mutator.cravingXP ? mutator.lateCravingXP : mutator.cravingXP), 0);
+  return dryDays * mutator.dryXP + fromCravings + bonus;
+}
+function regionsFrom(xp) { return Math.min(28, Math.floor(xp / XP_PER_REGION)); }
 
 function useNow(intervalMs) {
   const [now, setNow] = useState(Date.now());
@@ -364,8 +478,11 @@ async function builtinReply(name, context, userMsg) {
 function templateReply(name, ctx, userMsg) {
   const m = userMsg.toLowerCase();
   const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
-  const { usedUnits, budget, dryDays, mood, mutatorName, cravings } = ctx;
-  const left = Math.max(0, budget - usedUnits).toFixed(1);
+  const { usedUnits, budget, dryDays, mood, mutatorName, cravings, capacity, paused } = ctx;
+  // BAR-6: capacity talk stays behavioural. "In hand" is headroom against the
+  // budget, never a statement about a body recovering.
+  const left = Math.max(0, capacity).toFixed(1);
+  const perDay = regenPerDay(budget).toFixed(1);
 
   if (/(urge|craving|fancy a|want a drink|thinking about a drink|pub)/.test(m)) {
     return pick([
@@ -375,26 +492,29 @@ function templateReply(name, ctx, userMsg) {
     ]);
   }
   if (/(how('| i)?s my week|how am i|doing|week looking|honest)/.test(m)) {
-    if (mood === "thriving") return `Honestly? Glowing. ${usedUnits.toFixed(1)} of ${budget} units used, ${dryDays} dry days banked. If you keep this up I'll need sunglasses.`;
-    if (mood === "steady") return `Steady as she goes. ${left} units still in hand this week and ${dryDays} dry days this season. Nothing dramatic, which is rather the point.`;
-    if (mood === "tired") return `Bit of a wobbly one: over the comfortable line this week. Not a disaster, just a lean week to lean back from. The map doesn't unreveal itself, remember.`;
-    return `Rough patch, no varnish on it. But rough patches end, and the season score forgets faster than you'd think. Today's a clean page; that's all we need.`;
+    if (paused) return `${left} units in hand, and nothing comes back tomorrow: today's total is three days' worth in one go. Not a telling-off, just the arithmetic. The morning after that, it picks up again.`;
+    if (mood === "thriving") return `Honestly? Glowing. ${usedUnits.toFixed(1)} units across the last seven days, ${dryDays} dry days banked. If you keep this up I'll need sunglasses.`;
+    if (mood === "steady") return `Steady as she goes. ${left} units in hand right now and ${dryDays} dry days this season. Nothing dramatic, which is rather the point.`;
+    if (mood === "tired") return `Bit of a wobbly stretch: past the comfortable line. Not a disaster, and nothing wipes clean on a Monday, so it just eases back as the quiet days add up. ${perDay} units come back each morning.`;
+    return `Rough patch, no varnish on it. But it moves: ${perDay} units of headroom return every morning, whatever yesterday held. Today's a page, not a verdict.`;
   }
   if (/(encourag|rough|hard|struggl|tough|motivat)/.test(m)) {
     return pick([
       `You've shown up ${dryDays} dry days this season without anyone making you. That's not luck, that's a pattern. Patterns win.`,
       `Here's the unglamorous truth: this works by being boring and repeated, and you're doing exactly that. I'm a lamp spirit; I know about staying lit.`,
       `This week's rule is ${mutatorName}, which suits you, frankly. One evening at a time; I'll handle the glowing.`,
+      `Worth knowing: spreading the same units out costs you less than saving them for one night. That's not me moralising, it's how the bar is built, and it's straight off the NHS advice.`,
+      `Nothing here resets on a Monday, which cuts both ways: no clean slate handed out, and no week written off either. ${perDay} units of room back every morning, earned by nothing more than a quiet day.`,
     ]);
   }
   if (/(hello|hi\b|hey|evening|morning|alright)/.test(m)) {
     return pick([
-      `Evening. Lamp's lit, ledger's honest, and you've got ${left} units in hand this week. What's on your mind?`,
+      `Evening. Lamp's lit, ledger's honest, and you've got ${left} units in hand. What's on your mind?`,
       `Hello you. ${dryDays} dry days this season and counting. I've been keeping the fog back while you were away.`,
     ]);
   }
   return pick([
-    `I'm a simple spirit: I know your week (${usedUnits.toFixed(1)} of ${budget} units), your ${dryDays} dry days, and roughly forty jokes. Ask me how you're doing, or tell me about an urge.`,
+    `I'm a simple spirit: I know your capacity (${left} of ${budget} units in hand), your ${dryDays} dry days, and roughly forty jokes. Ask me how you're doing, or tell me about an urge.`,
     `Can't claim to understand everything, but I understand your ledger, and it says you're ${mood}. Try "how's my week?" or tell me what you're wrestling with.`,
   ]);
 }
@@ -408,10 +528,13 @@ function moodFrom(ratio) {
   if (ratio <= 1.5) return "tired";
   return "rough";
 }
+// CMP-2 / MET-4: mood reads the trailing seven days, and nothing resets on a week
+// boundary any more (BAR-1), so the copy no longer promises a weekly turn of the
+// page. It brightens as the quiet days accumulate, whichever days those are.
 const moodCopy = {
-  thriving: (n) => `${n} is glowing. Best week in a while.`,
-  steady: (n) => `${n} is doing fine. On track this week.`,
-  tired: (n) => `${n} looks a bit tired. It recovers as the week does.`,
+  thriving: (n) => `${n} is glowing. Brightest stretch in a while.`,
+  steady: (n) => `${n} is doing fine. Nicely level.`,
+  tired: (n) => `${n} looks a bit tired. Brightens as the quiet days add up.`,
   rough: (n) => `${n} has had a rough patch. Nothing here is permanent.`,
 };
 
@@ -469,25 +592,50 @@ function Companion({ mood, size = 180 }) {
   );
 }
 
-function HealthBar({ used, budget, blind, isSunday }) {
-  const remaining = Math.max(0, budget - used);
-  const pct = Math.max(0, Math.min(1, remaining / budget));
-  const over = used - budget;
+// BAR-1: shows current capacity, which regenerates daily rather than resetting on
+// a calendar boundary. BAR-6: the copy stays behavioural. Regeneration at budget/7
+// is a game abstraction chosen so that a steady 2 units a day breaks even; it is not
+// a claim about how a body recovers, and nothing here may imply one.
+function HealthBar({ capacity, budget, blind, isSunday, onExplain, pausedTomorrow }) {
+  const pct = Math.max(0, Math.min(1, capacity / budget));
+  const over = capacity < 0 ? -capacity : 0;
   const color = pct > 0.5 ? palette.bar : pct > 0.15 ? palette.barLow : palette.barGone;
   const hidden = blind && !isSunday;
+  const regen = regenPerDay(budget);
+  const backTomorrow = Math.min(regen, budget - capacity);
+  // Debt is floored at one budget (BAR-5), so |capacity|/budget fills the bar.
+  const debtPct = Math.max(0, Math.min(1, -capacity / budget));
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: palette.inkDim, marginBottom: 6 }}>
-        <span>This week</span>
-        <span>{hidden ? "Hidden until Sunday" : over > 0 ? `${over.toFixed(1)} units over` : `${remaining.toFixed(1)} of ${budget} units left`}</span>
+        <span>Capacity</span>
+        <span>{hidden ? "Hidden until Sunday" : over > 0 ? `${over.toFixed(1)} units over` : `${capacity.toFixed(1)} of ${budget} units left`}</span>
       </div>
-      <div role="progressbar" aria-valuenow={hidden ? undefined : Math.round(pct * 100)} style={{ height: 18, borderRadius: 10, background: "#0b1215", border: `1px solid ${palette.line}`, overflow: "hidden", position: "relative" }}>
+      <div role="progressbar" aria-valuenow={hidden ? undefined : Math.round(pct * 100)} aria-valuemin={0} aria-valuemax={100} aria-label="Remaining unit capacity" style={{ height: 18, borderRadius: 10, background: "#0b1215", border: `1px solid ${palette.line}`, overflow: "hidden", position: "relative" }}>
         {hidden ? (
           <div style={{ position: "absolute", inset: 0, background: "repeating-linear-gradient(45deg, #16262c, #16262c 8px, #1e2c33 8px, #1e2c33 16px)", display: "grid", placeItems: "center", fontSize: 11, color: palette.inkDim, letterSpacing: 1 }}>blind week</div>
+        ) : capacity < 0 ? (
+          // BAR-5: an empty bar cannot tell 2 units of debt from 14, so depth is
+          // shown as a dim fill rather than a warning. Muted on purpose (P1).
+          <div style={{ width: `${debtPct * 100}%`, height: "100%", background: `repeating-linear-gradient(45deg, ${palette.barGone}66, ${palette.barGone}66 6px, ${palette.barGone}33 6px, ${palette.barGone}33 12px)`, borderRadius: 9, transition: "width 500ms ease" }} />
         ) : (
           <div style={{ width: `${pct * 100}%`, height: "100%", background: `linear-gradient(90deg, ${color}, ${color}cc)`, borderRadius: 9, transition: "width 500ms ease" }} />
         )}
       </div>
+      {!hidden && (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginTop: 7, fontSize: 12.5, color: palette.inkDim }}>
+          {/* BAR-7: state the forfeited refill plainly and without colour. It is
+              arithmetic the user can check in the log, not a reprimand (P1). */}
+          <span>{pausedTomorrow
+            ? "Three days' worth today: none back tomorrow"
+            : backTomorrow > 0.05 ? `+${backTomorrow.toFixed(1)} back at 05:00` : "Full. Nothing to restore."}</span>
+          {onExplain && (
+            <button onClick={onExplain} style={{ background: "none", border: "none", color: palette.bar, fontSize: 12.5, fontFamily: "inherit", cursor: "pointer", padding: 0, textDecoration: "underline", textUnderlineOffset: 3, whiteSpace: "nowrap", flexShrink: 0 }}>
+              How this works
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -538,7 +686,7 @@ function FogWorld({ revealed }) {
 // =====================================================================
 export default function Winifred() {
   const [state, setState] = useState(null);
-  const [screen, setScreen] = useState("home"); // home|setup|ai|urge|settings|chat|recap
+  const [screen, setScreen] = useState("home"); // home|setup|ai|urge|settings|chat|recap|log
   const [toast, setToast] = useState(null);
   const [welcomeBack, setWelcomeBack] = useState(false);
   const [iosInstall, setIosInstall] = useState(false);
@@ -639,17 +787,37 @@ export default function Winifred() {
     // eslint-disable-next-line
   }, [minuteTick]);
 
+  // BAR-4: hoisted above the loading guard on purpose. This is a hook, and the
+  // guard below returns early on the first render, so computing capacity in the
+  // derived block would change the hook count between renders (React #310).
+  const todayStart = dayStart(now);
+  const pausedTomorrow = useMemo(
+    () => (state ? refillPausedTomorrow(state.logs, state.budget, now) : false),
+    // eslint-disable-next-line
+    [state && state.logs, state && state.budget, todayStart]
+  );
+  const capacity = useMemo(
+    () => (state ? capacityAt(state.logs, state.budget, now) : 0),
+    // Recomputed when a drink is logged or removed, when the budget moves, and
+    // once per 05:00 boundary; not on the whole-app one-second tick.
+    // eslint-disable-next-line
+    [state && state.logs, state && state.budget, todayStart]
+  );
+
   if (!state) {
     return <div style={{ minHeight: "100dvh", background: palette.bg, color: palette.inkDim, display: "grid", placeItems: "center", fontFamily: "ui-rounded, 'SF Pro Rounded', 'Nunito', system-ui, sans-serif" }}>Lighting the lamp…</div>;
   }
 
   // ----- derived -----
   const ws = weekStart(now);
-  const weekLogs = state.logs.filter((l) => l.t >= ws);
-  const usedUnits = weekLogs.reduce((a, l) => a + l.units, 0);
-  const weekSpend = weekLogs.reduce((a, l) => a + l.cost, 0);
+  // MET-4: every unit-derived figure now shares one window. The bar regenerates
+  // daily (BAR-4), so a calendar week no longer means anything to it; mixing a
+  // calendar total with a rolling companion mood is what made the old bar read
+  // as an amnesty every Monday.
   const last7 = state.logs.filter((l) => l.t >= now - 7 * DAY);
-  const mood = moodFrom(last7.reduce((a, l) => a + l.units, 0) / Math.max(1, state.budget));
+  const usedUnits = last7.reduce((a, l) => a + l.units, 0);
+  const weekSpend = last7.reduce((a, l) => a + l.cost, 0);
+  const mood = moodFrom(usedUnits / Math.max(1, state.budget));
   const mutator = mutatorFor(now);
   const dow = (new Date(now - 5 * HOUR).getDay() + 6) % 7;
   const isSunday = dow === 6;
@@ -660,8 +828,9 @@ export default function Winifred() {
   for (let i = 0; i < seasonDayNum - 1; i++) if (!seasonLogsDays.has(dayKey(state.seasonStart + i * DAY))) dryDays++;
   const seasonCravings = state.cravingsWon.filter((c) => c.t >= state.seasonStart);
   const seasonBonus = state.bonusXP.filter((b) => b.t >= state.seasonStart).reduce((a, b) => a + b.amount, 0);
-  const xp = dryDays * mutator.dryXP + seasonCravings.reduce((a, c) => a + (c.late && mutator.lateCravingXP > mutator.cravingXP ? mutator.lateCravingXP : mutator.cravingXP), 0) + seasonBonus;
-  const revealed = Math.min(28, dryDays + seasonCravings.length + Math.floor(seasonBonus / 30));
+  const xp = seasonXP({ dryDays, cravings: seasonCravings, bonus: seasonBonus, mutator });
+  const revealed = regionsFrom(xp);
+  const xpToNext = (revealed + 1) * XP_PER_REGION - xp;
   const seasonOver = seasonDayNum >= 28;
 
   const satStart = ws + 5 * DAY, monEnd = ws + 7 * DAY;
@@ -672,6 +841,12 @@ export default function Winifred() {
     update({ logs: [...state.logs, { t: Date.now(), ...d }] });
     say(`Logged: ${d.label}. ${state.companionName} noticed, and moved on.`);
   }
+  // DRK-10: removal is per entry, not blind last-only. Historical entries keep
+  // their original units (DRK-5), so removing one simply drops it from the log.
+  function removeLog(t) {
+    update((prev) => ({ ...prev, logs: prev.logs.filter((l) => l.t !== t) }));
+    say("Removed. The ledger is yours to correct.");
+  }
   function winCraving({ embers = 0, viaQuest = false }) {
     const late = new Date().getHours() >= 20;
     let bonus = [];
@@ -680,7 +855,14 @@ export default function Winifred() {
     update((prev) => ({ ...prev, cravingsWon: [...prev.cravingsWon, { t: Date.now(), late }], bonusXP: [...prev.bonusXP, ...bonus] }));
     setScreen("home");
     const worth = late && mutator.lateCravingXP > mutator.cravingXP ? mutator.lateCravingXP : mutator.cravingXP;
-    say(`Craving defeated${viaQuest ? " by quest" : ""}. +${worth} XP${bonus.length ? ` and +${bonus.reduce((a, b) => a + b.amount, 0)} bonus` : ""}. The fog pulls back a little.`);
+    // SSN-6: only claim the fog moved when a region actually cleared. Saying it
+    // every time is the thing that made XP feel like a number with no job.
+    const gained = worth + bonus.reduce((a, b) => a + b.amount, 0);
+    const after = regionsFrom(xp + gained);
+    const fog = after >= 28 ? "The Reach is clear."
+      : after > revealed ? `The fog pulls back${after - revealed > 1 ? " twice" : ""}.`
+      : `${(after + 1) * XP_PER_REGION - (xp + gained)} XP and the fog moves again.`;
+    say(`Craving defeated${viaQuest ? " by quest" : ""}. +${worth} XP${bonus.length ? ` and +${bonus.reduce((a, b) => a + b.amount, 0)} bonus` : ""}. ${fog}`);
   }
   function lockPrediction(n) {
     update({ predictions: [...state.predictions, { weekendStartT: satStart, weekendEnd: monEnd, predicted: n, scored: false }] });
@@ -704,9 +886,9 @@ export default function Winifred() {
 
   // ----- companion reply routing with safety layers -----
   async function getReply(userMsg, history) {
-    const ctx = { usedUnits, budget: state.budget, dryDays, mood, mutatorName: mutator.name, cravings: seasonCravings.length };
+    const ctx = { usedUnits, budget: state.budget, dryDays, mood, mutatorName: mutator.name, cravings: seasonCravings.length, capacity, paused: pausedTomorrow };
     if (CRISIS_RE.test(userMsg)) return { text: crisisReply(state.companionName), via: "device" };
-    const contextLine = `Weekly budget ${state.budget} units; ${usedUnits.toFixed(1)} used this week; mood ${mood}; ${dryDays} dry days this season; ${seasonCravings.length} cravings beaten; weekly mutator "${mutator.name}"; season day ${seasonDayNum} of 28.`;
+    const contextLine = `Weekly budget ${state.budget} units; ${usedUnits.toFixed(1)} used in the last 7 days; capacity ${capacity.toFixed(1)} of ${state.budget}, restoring ${regenPerDay(state.budget).toFixed(1)} a day${pausedTomorrow ? " (paused tomorrow: three days' worth logged today)" : ""}; mood ${mood}; ${dryDays} dry days this season; ${seasonCravings.length} cravings beaten; weekly mutator "${mutator.name}"; season day ${seasonDayNum} of 28.`;
     const tier = state.ai.tier;
     try {
       if (tier === "cloud" && state.ai.cloudConsent) {
@@ -812,8 +994,26 @@ export default function Winifred() {
   }
 
   // ----- recap -----
+  // DRK-10
+  if (screen === "log") {
+    return (
+      <LogScreen
+        shell={shell}
+        card={card}
+        logs={state.logs}
+        budget={state.budget}
+        capacity={capacity}
+        show={state.show}
+        blind={mutator.blind && !isSunday}
+        now={now}
+        onRemove={removeLog}
+        onBack={() => setScreen("home")}
+      />
+    );
+  }
+
   if (screen === "recap") {
-    return <RecapScreen shell={shell} card={card} state={state} dryDays={dryDays} xp={xp} seasonCravings={seasonCravings} seasonDayNum={seasonDayNum} onBack={() => setScreen("home")} onBank={seasonOver ? newSeason : null} />;
+    return <RecapScreen shell={shell} card={card} state={state} dryDays={dryDays} xp={xp} revealed={revealed} seasonCravings={seasonCravings} seasonDayNum={seasonDayNum} onBack={() => setScreen("home")} onBank={seasonOver ? newSeason : null} />;
   }
 
   // ----- settings -----
@@ -858,6 +1058,7 @@ export default function Winifred() {
               <BigButton tone="ghost" onClick={() => setScreen("ai")}>AI and privacy</BigButton>
             </div>
             <div style={{ marginTop: 10 }}>
+              <BigButton tone="ghost" onClick={() => setScreen("log")}>Drink log and history</BigButton>
               <BigButton tone="ghost" onClick={() => { if (state.logs.length) { update({ logs: state.logs.slice(0, -1) }); say("Last drink removed."); } }}>Undo last logged drink</BigButton>
             </div>
             <div style={{ marginTop: 10 }}>
@@ -1000,15 +1201,20 @@ export default function Winifred() {
         </div>
 
         <div style={{ ...card, marginTop: 14 }}>
-          <HealthBar used={usedUnits} budget={state.budget} blind={mutator.blind} isSunday={isSunday} />
+          <HealthBar capacity={capacity} budget={state.budget} blind={mutator.blind} isSunday={isSunday} onExplain={() => setScreen("log")} pausedTomorrow={pausedTomorrow} />
           <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 6, fontSize: 13, color: palette.inkDim, marginTop: 10 }}>
             <span>
               {[
-                state.show.kcal ? (mutator.blind && !isSunday ? "kcal hidden until Sunday" : `~${kcalFrom(usedUnits)} kcal from alcohol this week`) : null,
+                state.show.kcal ? (mutator.blind && !isSunday ? "kcal hidden until Sunday" : `~${kcalFrom(usedUnits)} kcal from alcohol, last 7 days`) : null,
                 state.show.money ? `£${weekSpend.toFixed(2)} spent` : null,
-              ].filter(Boolean).join(" · ") || "Quiet ledger this week"}
+              ].filter(Boolean).join(" · ") || "Quiet ledger these seven days"}
             </span>
             <span style={{ color: palette.accent }}>{mutator.name}: {mutator.desc}</span>
+          </div>
+          <div style={{ marginTop: 10, textAlign: "right" }}>
+            <button onClick={() => setScreen("log")} style={{ background: "none", border: `1px solid ${palette.line}`, color: palette.inkDim, borderRadius: 999, padding: "6px 14px", fontSize: 13, cursor: "pointer", fontFamily: "inherit", minHeight: 34 }}>
+              {state.logs.length ? `Drink log · ${state.logs.length}` : "Drink log"}
+            </button>
           </div>
         </div>
 
@@ -1052,15 +1258,19 @@ export default function Winifred() {
           </div>
           <FogWorld revealed={revealed} />
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: palette.inkDim, marginTop: 10 }}>
-            <span>Day {seasonDayNum} of 28 · {dryDays} dry · {seasonCravings.length} cravings beaten</span>
+            {/* SSN-6: the map's next step, priced in the currency that buys it. */}
+            <span>{revealed >= 28 ? "The Reach is clear." : `${xpToNext} XP to the next region`}</span>
             <button onClick={() => setScreen("recap")} style={{ background: "none", border: "none", color: seasonOver ? palette.accent : palette.inkDim, cursor: "pointer", fontFamily: "inherit", fontWeight: 700, fontSize: 13, padding: 0 }}>
               {seasonOver ? "Season recap →" : "Recap"}
             </button>
           </div>
+          <div style={{ fontSize: 12.5, color: palette.inkDim, marginTop: 6, lineHeight: 1.5 }}>
+            Day {seasonDayNum} of 28 · {dryDays} dry · {seasonCravings.length} cravings beaten · {XP_PER_REGION} XP clears a region
+          </div>
         </div>
 
         <p style={{ fontSize: 11.5, color: palette.inkDim, textAlign: "center", marginTop: 18, lineHeight: 1.5 }}>
-          Prototype. One heavy night costs points, never the game. Not medical advice; if cutting down feels impossible or withdrawal symptoms appear, a GP or local alcohol service is the right next move.
+          Prototype. One heavy night slows the map, never ends the game. Not medical advice; if cutting down feels impossible or withdrawal symptoms appear, a GP or local alcohol service is the right next move.
         </p>
 
         {toast && (
@@ -1434,6 +1644,166 @@ function QuestSuggester({ tier, cloudConsent, profile, onProfile, deck, onAddQue
   );
 }
 
+// =====================================================================
+// DRK-10: the drink log. The bar regenerates from history now (BAR-4), so the
+// history has to be visible: without it the movement is unexplainable. Dry runs
+// are collapsed into one line each so the restoring days are legible rather than
+// a wall of empty rows.
+// =====================================================================
+function LogScreen({ shell, card, logs, budget, capacity, show, blind, now, onRemove, onBack }) {
+  const today = dayStart(now);
+  const regen = regenPerDay(budget);
+
+  // Figures here come from the same walk that drives the bar (capacityTimeline),
+  // so a "+4.0 restored" line can never disagree with the bar it explains. That
+  // matters more now that a refill can be forfeited (BAR-7).
+  const days = useMemo(() => {
+    if (!logs.length) return [];
+    const byDay = new Map();
+    for (const l of logs) {
+      const k = dayStart(l.t);
+      if (!byDay.has(k)) byDay.set(k, []);
+      byDay.get(k).push(l);
+    }
+    const tl = new Map(capacityTimeline(logs, budget, now).map((r) => [r.t, r]));
+    const first = dayStart(Math.min(...logs.map((l) => l.t)));
+    const out = [];
+    let cur = today, guard = 0;
+    while (cur >= first && guard++ < 400) {
+      const rec = tl.get(cur) || { refill: 0, concentrated: false, paused: false, after: 0 };
+      const entries = byDay.get(cur);
+      if (entries) {
+        out.push({ kind: "day", t: cur, rec, entries: entries.slice().sort((a, b) => b.t - a.t) });
+      } else {
+        const last = out[out.length - 1];
+        if (last && last.kind === "dry") {
+          last.count += 1;
+          last.restored += rec.refill;
+          if (rec.paused) last.paused += 1;
+        } else {
+          out.push({ kind: "dry", t: cur, count: 1, restored: rec.refill, paused: rec.paused ? 1 : 0 });
+        }
+      }
+      cur = addDays(cur, -1);
+    }
+    return out;
+    // eslint-disable-next-line
+  }, [logs, budget, today]);
+
+  const backTomorrow = Math.min(regen, budget - capacity);
+
+  return (
+    <div style={shell}>
+      <div style={{ maxWidth: 560, margin: "0 auto" }}>
+        <button onClick={onBack} style={{ background: "none", border: "none", color: palette.inkDim, fontSize: 15, cursor: "pointer", padding: "10px 8px 10px 0", minHeight: 44, display: "inline-flex", alignItems: "center", fontFamily: "inherit" }}>← Back</button>
+        <h2 style={{ margin: "4px 0 4px", fontSize: 22 }}>Drink log</h2>
+        <p style={{ color: palette.inkDim, fontSize: 14, marginTop: 0, lineHeight: 1.5 }}>
+          Everything you have tapped, when you tapped it. Yours only, on this device.
+        </p>
+
+        <div style={{ ...card, marginTop: 6 }}>
+          <p style={{ margin: 0, fontSize: 14.5, lineHeight: 1.6, color: palette.ink }}>
+            <strong>How capacity works.</strong> You have {budget} units of room. Logging a drink spends it. Each morning at 05:00, {regen.toFixed(1)} units come back, up to a full {budget}.
+          </p>
+          <p style={{ margin: "10px 0 0", fontSize: 14, lineHeight: 1.6, color: palette.inkDim }}>
+            Nothing resets on a Monday. A heavy night is still there on Tuesday, and a quiet day pays you back the next morning. Go past zero and the room comes back the same way, a day at a time.
+          </p>
+          <p style={{ margin: "10px 0 0", fontSize: 14, lineHeight: 1.6, color: palette.inkDim }}>
+            How you spread it counts too. Log three or more days' worth in a single day ({concentrationThreshold(budget).toFixed(1)} units or more) and the next morning's {regen.toFixed(1)} is paused, so the same units cost more in one sitting than spread out. That follows the NHS advice to spread drinking over three or more days rather than saving it up.
+          </p>
+          <p style={{ margin: "10px 0 0", fontSize: 13, lineHeight: 1.6, color: palette.inkDim }}>
+            These are ways of keeping score, chosen from the weekly guideline and divided by seven. They are not a statement about what your body is doing.
+          </p>
+          {!blind && (
+            <p style={{ margin: "12px 0 0", fontSize: 14, color: palette.bar }}>
+              Right now: {capacity < 0 ? `${(-capacity).toFixed(1)} units over` : `${capacity.toFixed(1)} of ${budget} in hand`}
+              {backTomorrow > 0.05 ? ` · +${backTomorrow.toFixed(1)} at 05:00` : " · full"}
+            </p>
+          )}
+        </div>
+
+        {!logs.length && (
+          <div style={{ ...card, marginTop: 12 }}>
+            <p style={{ margin: 0, fontSize: 15, color: palette.ink }}>Nothing logged yet.</p>
+            <p style={{ margin: "8px 0 0", fontSize: 14, color: palette.inkDim, lineHeight: 1.6 }}>
+              When you tap a drink on the home screen it lands here with the time. There is nothing to catch up on.
+            </p>
+          </div>
+        )}
+
+        {days.map((g, gi) => {
+          if (g.kind === "dry") {
+            return (
+              <div key={`dry-${g.t}-${gi}`} style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 4px", color: palette.inkDim, fontSize: 13.5 }}>
+                <span style={{ flex: 1, height: 1, background: palette.line }} />
+                <span>
+                  {g.count} {g.count === 1 ? "day" : "days"} with nothing logged
+                  {blind ? "" : ` · +${g.restored.toFixed(1)} restored`}
+                  {!blind && g.paused > 0 ? ` (${g.paused === 1 ? "one morning" : `${g.paused} mornings`} paused)` : ""}
+                </span>
+                <span style={{ flex: 1, height: 1, background: palette.line }} />
+              </div>
+            );
+          }
+          const units = g.entries.reduce((a, l) => a + l.units, 0);
+          const cost = g.entries.reduce((a, l) => a + Number(l.cost || 0), 0);
+          const subtotal = [
+            blind ? null : `${fmtUnits(units)}u`,
+            show.kcal && !blind ? `~${kcalFrom(units)}kcal` : null,
+            show.money ? `£${cost.toFixed(2)}` : null,
+          ].filter(Boolean).join(" · ");
+          return (
+            <div key={g.t} style={{ ...card, marginTop: 12, padding: 14 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, marginBottom: 8 }}>
+                <strong style={{ fontSize: 15.5 }}>{dayLabel(g.t, now)}</strong>
+                <span style={{ fontSize: 13, color: palette.inkDim }}>{subtotal || `${g.entries.length} logged`}</span>
+              </div>
+              {/* BAR-7, shown as the arithmetic it is, in the dim ink rather than
+                  a warning colour (P1). */}
+              {!blind && (g.rec.concentrated || g.rec.paused) && (
+                <p style={{ margin: "0 0 8px", fontSize: 12.5, color: palette.inkDim, lineHeight: 1.5 }}>
+                  {[
+                    g.rec.concentrated ? "Three or more days' worth in one day, so the next morning's refill was paused." : null,
+                    g.rec.paused ? "No refill this morning, following the day before." : null,
+                  ].filter(Boolean).join(" ")}
+                </p>
+              )}
+              <div style={{ display: "grid", gap: 2 }}>
+                {g.entries.map((l) => (
+                  <div key={l.t} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderTop: `1px solid ${palette.line}` }}>
+                    <span style={{ fontSize: 13, color: palette.inkDim, fontVariantNumeric: "tabular-nums", minWidth: 42 }}>
+                      {new Date(l.t).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}
+                    </span>
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      <span style={{ fontSize: 14.5, color: palette.ink }}>{l.label}</span>
+                      <span style={{ display: "block", fontSize: 12.5, color: palette.inkDim }}>
+                        {[
+                          l.ml ? `${l.ml}ml at ${l.abv}%` : null,
+                          blind ? null : `${fmtUnits(l.units)}u`,
+                          show.kcal && !blind ? `~${kcalFrom(l.units)}kcal` : null,
+                          show.money ? `£${Number(l.cost || 0).toFixed(2)}` : null,
+                        ].filter(Boolean).join(" · ")}
+                      </span>
+                    </span>
+                    <button onClick={() => onRemove(l.t)} aria-label={`Remove ${l.label} logged at ${new Date(l.t).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}`} style={{ background: "none", border: `1px solid ${palette.line}`, color: palette.inkDim, borderRadius: 999, minHeight: 34, minWidth: 34, padding: "0 12px", fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+
+        {days.length >= 400 && (
+          <p style={{ fontSize: 13, color: palette.inkDim, marginTop: 12 }}>Older entries are in your export.</p>
+        )}
+        <div style={{ height: 24 }} />
+      </div>
+    </div>
+  );
+}
+
 function PredictionCard({ budget, onLock }) {
   const [n, setN] = useState(Math.round(budget * 0.5));
   return (
@@ -1608,7 +1978,7 @@ function UrgeScreen({ shell, card, name, quests, notes, onWin, onBail }) {
   );
 }
 
-function RecapScreen({ shell, card, state, dryDays, xp, seasonCravings, seasonDayNum, onBack, onBank }) {
+function RecapScreen({ shell, card, state, dryDays, xp, revealed, seasonCravings, seasonDayNum, onBack, onBank }) {
   const seasonLogs = state.logs.filter((l) => l.t >= state.seasonStart);
   const spend = seasonLogs.reduce((a, l) => a + l.cost, 0);
   const units = seasonLogs.reduce((a, l) => a + l.units, 0);
@@ -1637,7 +2007,7 @@ function RecapScreen({ shell, card, state, dryDays, xp, seasonCravings, seasonDa
         <h2 style={{ fontSize: 24, fontWeight: 800, marginBottom: 2 }}>Season so far</h2>
         <p style={{ color: palette.inkDim, marginTop: 0, fontSize: 14 }}>Day {seasonDayNum} of 28 · Rank {state.prestige}</p>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          {stat(`${xp} XP`, "banked this season")}
+          {stat(`${xp} XP`, `earned this season, clearing ${revealed} of 28 regions`)}
           {stat(dryDays, "dry days")}
           {stat(seasonCravings.length, "cravings beaten, the hard points")}
           {stat(best, "longest dry run, days")}
