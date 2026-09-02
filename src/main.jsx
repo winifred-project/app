@@ -7,6 +7,13 @@ import { initUpdates } from "./updates.js";
 // of the component so a render never affects whether updates are checked for.
 initUpdates();
 
+// DEV-1: the dev clock panel (spec 5.16) is pulled in dynamically inside a
+// dead branch, so Rollup drops the module from a production build entirely
+// rather than shipping it behind a runtime flag.
+if (import.meta.env.DEV) {
+  import("./DevPanel.jsx").then((m) => m.mountDevPanel()).catch(() => {});
+}
+
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
     <Winifred />
