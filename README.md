@@ -30,8 +30,9 @@ must be set to **GitHub Actions**.
 
 ### Releasing (UPD-1 to UPD-5)
 
-There is no version number to bump. A build identifies itself by the commit
-it was built from, injected as `__BUILD_ID__` and shown in Settings as
+There is no version number to bump. `package.json` says `0.0.0` and nothing
+reads it; npm only wants the field to exist. A build identifies itself by
+the commit it was built from, injected as `__BUILD_ID__` and shown in Settings as
 `Build 62afb1c` with the date it was published. On GitHub Actions that comes
 from `GITHUB_SHA`; locally it comes from `git rev-parse`, with a trailing
 `+` when the working tree is dirty, because a build with uncommitted changes
