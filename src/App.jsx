@@ -787,7 +787,11 @@ function HealthBar({ capacity, budget, blind, isSunday, onExplain, pausedTomorro
             ? "Three days' worth today: none back tomorrow"
             : backTomorrow > 0.05 ? `+${backTomorrow.toFixed(1)} back at 05:00` : "Full. Nothing to restore."}</span>
           {onExplain && (
-            <button onClick={onExplain} style={{ background: "none", border: "none", color: palette.bar, fontSize: 12.5, fontFamily: "inherit", cursor: "pointer", padding: 0, textDecoration: "underline", textUnderlineOffset: 3, whiteSpace: "nowrap", flexShrink: 0 }}>
+            <button onClick={onExplain} style={{ background: "none", border: "none", color: palette.bar, fontSize: 12.5, fontFamily: "inherit", cursor: "pointer", textDecoration: "underline", textUnderlineOffset: 3, whiteSpace: "nowrap", flexShrink: 0,
+              // NFR-4: padded to a thumb-sized hit box, then pulled back by the
+              // same amount so the row costs no extra height. MET-5 has no
+              // pixels spare and an inline link still has to be tappable.
+              padding: "11px 6px", margin: "-11px -6px" }}>
               How this works
             </button>
           )}
@@ -844,6 +848,11 @@ function FogWorld({ revealed }) {
 export default function Winifred() {
   const [state, setState] = useState(null);
   const [screen, setScreen] = useState("home"); // home|setup|ai|urge|settings|chat|recap|log
+  // Home-screen disclosure. Both default closed: the fold belongs to capacity
+  // and the two primary actions, and neither of these is a decision the user
+  // makes on most opens.
+  const [forecastOpen, setForecastOpen] = useState(false);
+  const [mutatorOpen, setMutatorOpen] = useState(false);
   const [toast, setToast] = useState(null);
   const [welcomeBack, setWelcomeBack] = useState(false);
   const [iosInstall, setIosInstall] = useState(false);
@@ -1349,54 +1358,70 @@ export default function Winifred() {
           </div>
         )}
 
-        <Companion mood={mood} />
-        <p style={{ textAlign: "center", color: palette.inkDim, fontSize: 14.5, marginTop: -4, lineHeight: 1.5 }}>{moodCopy[mood](state.companionName)}</p>
-        <div style={{ textAlign: "center", marginTop: 2 }}>
-          <button onClick={() => setScreen("chat")} style={{ background: "none", border: `1px solid ${palette.line}`, color: palette.bar, borderRadius: 999, padding: "7px 16px", fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>
-            Talk to {state.companionName}{tierBadge ? ` · ${tierBadge}` : ""}
-          </button>
-        </div>
-
-        <div style={{ ...card, marginTop: 14 }}>
-          <HealthBar capacity={capacity} budget={state.budget} blind={mutator.blind} isSunday={isSunday} onExplain={() => setScreen("log")} pausedTomorrow={pausedTomorrow} />
-          <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 6, fontSize: 13, color: palette.inkDim, marginTop: 10 }}>
-            <span>
-              {[
-                state.show.kcal ? (mutator.blind && !isSunday ? "kcal hidden until Sunday" : `~${kcalFrom(usedUnits)} kcal from alcohol, last 7 days`) : null,
-                state.show.money ? `£${weekSpend.toFixed(2)} spent` : null,
-              ].filter(Boolean).join(" · ") || "Quiet ledger these seven days"}
-            </span>
-            <span style={{ color: palette.accent }}>{mutator.name}: {mutator.desc}</span>
+        {/* P6: she still leads the screen, but as a row rather than a stage.
+            Compact art plus the mood line keeps her the first thing read while
+            leaving the fold to the two primary actions (P2, P5). */}
+        <div style={{ display: "flex", alignItems: "center", gap: 13, marginTop: 8 }}>
+          <div style={{ flexShrink: 0 }}>
+            <Companion mood={mood} size={104} />
           </div>
-          <div style={{ marginTop: 10, textAlign: "right" }}>
-            <button onClick={() => setScreen("log")} style={{ background: "none", border: `1px solid ${palette.line}`, color: palette.inkDim, borderRadius: 999, padding: "6px 14px", fontSize: 13, cursor: "pointer", fontFamily: "inherit", minHeight: 34 }}>
-              {state.logs.length ? `Drink log · ${state.logs.length}` : "Drink log"}
+          <div style={{ minWidth: 0 }}>
+            <p style={{ color: palette.inkDim, fontSize: 14.5, margin: "0 0 9px", lineHeight: 1.45 }}>{moodCopy[mood](state.companionName)}</p>
+            <button onClick={() => setScreen("chat")} style={{ background: "none", border: `1px solid ${palette.line}`, color: palette.bar, borderRadius: 999, padding: "8px 15px", fontSize: 13.5, cursor: "pointer", fontFamily: "inherit", minHeight: 36 }}>
+              Talk to {state.companionName}{tierBadge ? ` · ${tierBadge}` : ""}
             </button>
           </div>
         </div>
 
-        {(canPredict || (thisWeekendPred && !thisWeekendPred.scored)) && (
-          <div style={{ ...card, marginTop: 12 }}>
-            {canPredict ? (
-              <PredictionCard budget={state.budget} onLock={lockPrediction} />
-            ) : (
-              <p style={{ margin: 0, fontSize: 14, color: palette.inkDim }}>
-                Weekend forecast locked: <strong style={{ color: palette.ink }}>{thisWeekendPred.predicted} units</strong>. Scored Monday. Accuracy pays, not abstinence.
-              </p>
-            )}
+        {/* Capacity is the state of play, so it stays directly under her and
+            directly above the two actions that change it. Three stacked text
+            rows became one ledger line plus a chip row (MET-4, MUT-1). */}
+        <div style={{ ...card, marginTop: 12, padding: 15 }}>
+          <HealthBar capacity={capacity} budget={state.budget} blind={mutator.blind} isSunday={isSunday} onExplain={() => setScreen("log")} pausedTomorrow={pausedTomorrow} />
+          <div style={{ fontSize: 13, color: palette.inkDim, marginTop: 9, lineHeight: 1.45 }}>
+            {[
+              state.show.kcal ? (mutator.blind && !isSunday ? "kcal hidden until Sunday" : `~${kcalFrom(usedUnits)} kcal from alcohol, last 7 days`) : null,
+              state.show.money ? `£${weekSpend.toFixed(2)} spent` : null,
+            ].filter(Boolean).join(" · ") || "Quiet ledger these seven days"}
           </div>
-        )}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginTop: 10 }}>
+            {/* MUT-1: the mutator is a standing rule, not news. Its name earns a
+                chip; the wording behind it is one tap away. */}
+            <button
+              onClick={() => setMutatorOpen((v) => !v)}
+              aria-expanded={mutatorOpen}
+              aria-label={`This week's rule: ${mutator.name}`}
+              style={{ background: "none", border: `1px solid ${palette.accent}55`, color: palette.accent, borderRadius: 999, padding: "6px 12px", fontSize: 12.5, fontFamily: "inherit", cursor: "pointer", minHeight: 34, whiteSpace: "nowrap", flexShrink: 0 }}
+            >
+              {mutator.name} {mutatorOpen ? "▴" : "▾"}
+            </button>
+            <button onClick={() => setScreen("log")} style={{ background: "none", border: `1px solid ${palette.line}`, color: palette.inkDim, borderRadius: 999, padding: "6px 12px", fontSize: 12.5, cursor: "pointer", fontFamily: "inherit", minHeight: 34, whiteSpace: "nowrap", flexShrink: 0 }}>
+              {state.logs.length ? `Drink log · ${state.logs.length}` : "Drink log"}
+            </button>
+          </div>
+          {mutatorOpen && (
+            <p style={{ fontSize: 13, color: palette.inkDim, margin: "9px 0 0", lineHeight: 1.5 }}>{mutator.desc}</p>
+          )}
+        </div>
 
+        {/* P5: the crisis path is one line and must never need a scroll, so it
+            sits directly under the bar at a fixed position. */}
         <div style={{ marginTop: 14 }}>
           <BigButton tone="warm" onClick={() => setScreen("urge")} style={{ fontSize: 17 }}>I've got an urge · fight it</BigButton>
         </div>
 
-        <p style={{ fontSize: 13, color: palette.inkDim, margin: "18px 0 8px" }}>Log a drink honestly. Unlogged drinks break the game, not the rules.</p>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(110px, 1fr))", gap: 8 }}>
+        {/* P2: logging is the core mechanic and must take under three seconds,
+            which it cannot do from below the fold. */}
+        <p style={{ fontSize: 13, color: palette.inkDim, margin: "12px 0 7px" }}>Log a drink honestly. Unlogged drinks break the game, not the rules.</p>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(108px, 1fr))", gap: 8 }}>
           {state.drinks.map((d) => (
-            <BigButton key={d.label} onClick={() => logDrink(d)} style={{ padding: "12px 8px", fontSize: 14.5 }}>
+            <BigButton key={d.label} onClick={() => logDrink(d)} style={{ padding: "10px 7px", fontSize: 14 }}>
               {d.label}
-              <div style={{ fontSize: 12, color: palette.inkDim, fontWeight: 500, marginTop: 3 }}>
+              <div style={{ fontSize: 11.5, color: palette.inkDim, fontWeight: 500, marginTop: 2, lineHeight: 1.3 }}>
+                {/* DRK-4: label plus ml/ABV, units, kcal and price, all four
+                    subject to the 5.12 toggles. Tightened rather than trimmed:
+                    dropping a figure to win the fold would cost P2 honesty. A
+                    five-drink deck then clears a 390x664 viewport whole. */}
                 {[
                   d.ml ? `${d.ml}ml ${d.abv}%` : null,
                   `${fmtUnits(d.units)}u`,
@@ -1408,6 +1433,34 @@ export default function Winifred() {
           ))}
         </div>
 
+        {/* FCT-1: the forecast is one decision made once a week, so it waits as
+            a single row rather than holding 290px of the fold all week. */}
+        {(canPredict || (thisWeekendPred && !thisWeekendPred.scored)) && (
+          <div style={{ ...card, marginTop: 12, padding: 16 }}>
+            {canPredict ? (
+              forecastOpen ? (
+                <PredictionCard
+                  budget={state.budget}
+                  onLock={(n) => { setForecastOpen(false); lockPrediction(n); }}
+                  onClose={() => setForecastOpen(false)}
+                />
+              ) : (
+                <button
+                  onClick={() => setForecastOpen(true)}
+                  style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, width: "100%", background: "none", border: "none", padding: 0, minHeight: 34, color: palette.inkDim, fontFamily: "inherit", fontSize: 14, cursor: "pointer", textAlign: "left" }}
+                >
+                  <span>Weekend forecast · not called yet</span>
+                  <span style={{ color: palette.bar, whiteSpace: "nowrap", flexShrink: 0 }}>Call it →</span>
+                </button>
+              )
+            ) : (
+              <p style={{ margin: 0, fontSize: 14, color: palette.inkDim, lineHeight: 1.5 }}>
+                Weekend forecast locked: <strong style={{ color: palette.ink }}>{thisWeekendPred.predicted} units</strong>. Scored Monday. Accuracy pays, not abstinence.
+              </p>
+            )}
+          </div>
+        )}
+
         <div style={{ ...card, marginTop: 16 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
             <strong style={{ fontSize: 15 }}>The Reach · {revealed} of 28 regions clear</strong>
@@ -1417,7 +1470,7 @@ export default function Winifred() {
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: palette.inkDim, marginTop: 10 }}>
             {/* SSN-6: the map's next step, priced in the currency that buys it. */}
             <span>{revealed >= 28 ? "The Reach is clear." : `${xpToNext} XP to the next region`}</span>
-            <button onClick={() => setScreen("recap")} style={{ background: "none", border: "none", color: seasonOver ? palette.accent : palette.inkDim, cursor: "pointer", fontFamily: "inherit", fontWeight: 700, fontSize: 13, padding: 0 }}>
+            <button onClick={() => setScreen("recap")} style={{ background: "none", border: "none", color: seasonOver ? palette.accent : palette.inkDim, cursor: "pointer", fontFamily: "inherit", fontWeight: 700, fontSize: 13, padding: "11px 6px", margin: "-11px -6px" }}>
               {seasonOver ? "Season recap →" : "Recap"}
             </button>
           </div>
@@ -1961,21 +2014,30 @@ function LogScreen({ shell, card, logs, budget, capacity, show, blind, now, onRe
   );
 }
 
-function PredictionCard({ budget, onLock }) {
+function PredictionCard({ budget, onLock, onClose }) {
   const [n, setN] = useState(Math.round(budget * 0.5));
   return (
     <div>
-      <strong style={{ fontSize: 15 }}>Weekend forecast</strong>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
+        <strong style={{ fontSize: 15 }}>Weekend forecast</strong>
+        {onClose && (
+          <button onClick={onClose} style={{ background: "none", border: "none", color: palette.inkDim, fontSize: 13, fontFamily: "inherit", cursor: "pointer", padding: 0, whiteSpace: "nowrap", flexShrink: 0 }}>Later</button>
+        )}
+      </div>
+      {/* FCT-1/P2: honest self-prediction, scored on accuracy. Shortened because
+          the row above it now carries the framing and this is read on opening,
+          not on every home screen. */}
       <p style={{ color: palette.inkDim, fontSize: 13.5, lineHeight: 1.5, margin: "6px 0 10px" }}>
-        How many units this weekend, honestly? You're scored on accuracy, not restraint. Predict twelve and drink twelve, that's a perfect score. Know thyself.
+        How many units this weekend, honestly? Accuracy scores, not restraint: call twelve and drink twelve and that's a perfect round. Know thyself.
       </p>
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-        <input type="range" min="0" max={Math.max(20, budget * 2)} value={n} onChange={(e) => setN(Number(e.target.value))} style={{ flex: 1, accentColor: palette.accent }} />
-        <strong style={{ fontSize: 20, minWidth: 60, textAlign: "right" }}>{n} u</strong>
+        <input type="range" min="0" max={Math.max(20, budget * 2)} value={n} onChange={(e) => setN(Number(e.target.value))} aria-label="Units predicted for this weekend" style={{ flex: 1, accentColor: palette.accent }} />
+        <strong style={{ fontSize: 20, minWidth: 52, textAlign: "right" }}>{n} u</strong>
       </div>
       <div style={{ marginTop: 10 }}>
-        <BigButton tone="quiet" onClick={() => onLock(n)} style={{ padding: "11px 14px", fontSize: 15 }}>Lock it in (within 1u: +30 XP, within 3u: +15)</BigButton>
+        <BigButton tone="quiet" onClick={() => onLock(n)} style={{ padding: "11px 14px", fontSize: 15 }}>Lock in {n} units</BigButton>
       </div>
+      <p style={{ fontSize: 12.5, color: palette.inkDim, margin: "8px 0 0" }}>Within 1u: +30 XP. Within 3u: +15.</p>
     </div>
   );
 }
