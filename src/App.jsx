@@ -538,9 +538,105 @@ const moodCopy = {
   rough: (n) => `${n} has had a rough patch. Nothing here is permanent.`,
 };
 
+// CMP-6: the motion tuning table. Mood already drives glow, posture, eyes and
+// sprout (CMP-1); this adds the fifth channel, tempo. Thriving floats a little
+// higher, wider and brighter; rough barely stirs. Recovery is legible as the
+// companion picking up speed again, which is the felt channel CMP-4 assigns to
+// it and would be forbidden on the bar.
+//
+// The cycle lengths are the load-bearing decision here. The guided Breathe
+// circle in the craving encounter (CRV-2) runs a 7.6s cycle and is an explicit
+// instruction the user opted into. An idle companion breathing at a plausible
+// human rate on the home screen would be an instruction nobody opted into, and
+// one running all day. So every idle tempo below sits well outside the range a
+// person would entrain to: this is a lamp flame living, not a breath to follow.
+const MOOD_MOTION = {
+  thriving: { dur: "9.5s", scale: 1.035, rise: "-2px",   glowLo: 0.8,  sway: "2.2px", swayDur: "17s", gaze: 1 },
+  steady:   { dur: "11s",  scale: 1.028, rise: "-1.6px", glowLo: 0.85, sway: "1.8px", swayDur: "19s", gaze: 0.85 },
+  tired:    { dur: "13s",  scale: 1.02,  rise: "-1.1px", glowLo: 0.89, sway: "1.2px", swayDur: "23s", gaze: 0.6 },
+  rough:    { dur: "15s",  scale: 1.014, rise: "-0.7px", glowLo: 0.93, sway: "0.8px", swayDur: "27s", gaze: 0.4 },
+};
+
+// NFR-9. Read live rather than once, because iOS exposes the setting as a
+// system toggle the user may flip while the app is open.
+function usePrefersReducedMotion() {
+  const [reduced, setReduced] = useState(() => {
+    try { return window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch { return false; }
+  });
+  useEffect(() => {
+    let mq;
+    try { mq = window.matchMedia("(prefers-reduced-motion: reduce)"); } catch { return; }
+    const on = (e) => setReduced(e.matches);
+    if (mq.addEventListener) mq.addEventListener("change", on);
+    else mq.addListener(on);
+    return () => {
+      if (mq.removeEventListener) mq.removeEventListener("change", on);
+      else mq.removeListener(on);
+    };
+  }, []);
+  return reduced;
+}
+
+// CMP-7: where the user's finger or pointer is, as -1..1 from the centre of the
+// viewport. Deliberately not device orientation: that needs a system permission
+// prompt on iOS, and spending the user's trust on a motion-sensor dialogue in an
+// app whose entire promise is that nothing leaves the device is a bad trade
+// (P1, P3). Touch position gives most of the same aliveness for nothing.
+//
+// Coalesced onto one animation frame, so a fast drag causes one React render
+// per frame rather than one per pointer event.
+function useGaze(enabled) {
+  const [gaze, setGaze] = useState({ x: 0, y: 0 });
+  useEffect(() => {
+    if (!enabled) { setGaze({ x: 0, y: 0 }); return; }
+    let frame = 0;
+    let latest = null;
+    const flush = () => { frame = 0; if (latest) setGaze(latest); };
+    const onMove = (e) => {
+      const t = e.touches ? e.touches[0] : e;
+      if (!t) return;
+      const w = window.innerWidth || 1;
+      const h = window.innerHeight || 1;
+      const clamp = (v) => Math.max(-1, Math.min(1, v));
+      latest = { x: clamp((t.clientX / w) * 2 - 1), y: clamp((t.clientY / h) * 2 - 1) };
+      if (!frame) frame = requestAnimationFrame(flush);
+    };
+    // Settle back to centre when there is nothing to look at, so the companion
+    // does not hold a stare at the edge of the screen after a scroll ends.
+    const recentre = () => { latest = { x: 0, y: 0 }; if (!frame) frame = requestAnimationFrame(flush); };
+    window.addEventListener("pointermove", onMove, { passive: true });
+    window.addEventListener("touchmove", onMove, { passive: true });
+    window.addEventListener("touchend", recentre, { passive: true });
+    window.addEventListener("pointercancel", recentre, { passive: true });
+    document.addEventListener("pointerleave", recentre, { passive: true });
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("touchmove", onMove);
+      window.removeEventListener("touchend", recentre);
+      window.removeEventListener("pointercancel", recentre);
+      document.removeEventListener("pointerleave", recentre);
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [enabled]);
+  return gaze;
+}
+
 function Companion({ mood, size = 180 }) {
   const glowOpacity = { thriving: 0.95, steady: 0.65, tired: 0.3, rough: 0.12 }[mood];
   const bodyLift = { thriving: 0, steady: 3, tired: 8, rough: 12 }[mood];
+  const motion = MOOD_MOTION[mood];
+  const reduced = usePrefersReducedMotion();
+  const gaze = useGaze(!reduced);
+  // Offsets are SVG user units against a 140-wide viewBox, so they scale with
+  // the rendered size on their own. Small on purpose: this should register as
+  // attention, not as a character sliding about the screen.
+  const g = motion.gaze;
+  const bodyX = gaze.x * 3.4 * g, bodyY = gaze.y * 2.2 * g;
+  const eyeX = gaze.x * 1.8 * g, eyeY = gaze.y * 1.2 * g;
+  // Counter-motion on the glow: it sits behind the body, so shifting it the
+  // other way is what sells the depth and makes the lamp read as turning
+  // towards you rather than sliding.
+  const glowX = -gaze.x * 1.2 * g, glowY = -gaze.y * 0.8 * g;
   const eyes =
     mood === "thriving" ? (
       <>
@@ -573,21 +669,60 @@ function Companion({ mood, size = 180 }) {
     ) : (
       <path d="M70 28 q2 -7 5 -9" stroke="#4a6a63" strokeWidth="2.5" fill="none" strokeLinecap="round" />
     );
+  // Each group owns exactly one job, because CSS transforms and SVG transform
+  // attributes cannot share an element: posture (attribute, from mood), then
+  // sway, then parallax, then breath. Flattening any two of these together
+  // makes the next mood change fight the animation.
+  const vars = {
+    "--wf-breath-dur": motion.dur,
+    "--wf-breath-scale": motion.scale,
+    "--wf-breath-rise": motion.rise,
+    "--wf-glow-lo": motion.glowLo,
+    "--wf-glow-hi": 1,
+    "--wf-sway": motion.sway,
+    "--wf-sway-dur": motion.swayDur,
+    "--wf-shadow-scale": 0.94,
+  };
   return (
-    <svg viewBox="0 0 140 120" width={size} height={size * 0.857} role="img" aria-label={`Companion mood: ${mood}`} style={{ display: "block", margin: "0 auto" }}>
-      <ellipse cx="70" cy="72" rx="52" ry="44" fill={palette.glow} opacity={glowOpacity * 0.28} />
-      <ellipse cx="70" cy="72" rx="38" ry="32" fill={palette.glow} opacity={glowOpacity * 0.35} />
-      <g transform={`translate(0 ${bodyLift})`}>
-        <ellipse cx="70" cy="74" rx="34" ry="30" fill="#e9d9ae" />
-        <ellipse cx="70" cy="74" rx="34" ry="30" fill={palette.glow} opacity={glowOpacity * 0.5} />
-        {eyes}
-        {mood === "thriving" && <path d="M62 74 q8 7 16 0" stroke="#10191d" strokeWidth="3" fill="none" strokeLinecap="round" />}
-        {mood === "steady" && <path d="M63 75 q7 4 14 0" stroke="#10191d" strokeWidth="3" fill="none" strokeLinecap="round" />}
-        {mood === "tired" && <line x1="64" y1="76" x2="76" y2="76" stroke="#10191d" strokeWidth="3" strokeLinecap="round" />}
-        {mood === "rough" && <path d="M63 78 q7 -4 14 0" stroke="#10191d" strokeWidth="3" fill="none" strokeLinecap="round" />}
-        {sprout}
+    <svg
+      viewBox="0 0 140 120"
+      width={size}
+      height={size * 0.857}
+      role="img"
+      aria-label={`Companion mood: ${mood}`}
+      style={{ display: "block", margin: "0 auto", overflow: "visible", ...vars }}
+    >
+      <g className="wf-parallax" style={{ transform: `translate(${glowX}px, ${glowY}px)` }}>
+        <g className="wf-glow">
+          <ellipse cx="70" cy="72" rx="52" ry="44" fill={palette.glow} opacity={glowOpacity * 0.28} />
+          <ellipse cx="70" cy="72" rx="38" ry="32" fill={palette.glow} opacity={glowOpacity * 0.35} />
+        </g>
       </g>
-      <ellipse cx="70" cy="110" rx="30" ry="5" fill="#000" opacity="0.25" />
+      <g transform={`translate(0 ${bodyLift})`}>
+        <g className="wf-sway">
+          <g className="wf-parallax" style={{ transform: `translate(${bodyX}px, ${bodyY}px)` }}>
+            <g className="wf-breathe">
+              <ellipse cx="70" cy="74" rx="34" ry="30" fill="#e9d9ae" />
+              <ellipse cx="70" cy="74" rx="34" ry="30" fill={palette.glow} opacity={glowOpacity * 0.5} />
+              <g className="wf-gaze" style={{ transform: `translate(${eyeX}px, ${eyeY}px)` }}>
+                {eyes}
+              </g>
+              {mood === "thriving" && <path d="M62 74 q8 7 16 0" stroke="#10191d" strokeWidth="3" fill="none" strokeLinecap="round" />}
+              {mood === "steady" && <path d="M63 75 q7 4 14 0" stroke="#10191d" strokeWidth="3" fill="none" strokeLinecap="round" />}
+              {mood === "tired" && <line x1="64" y1="76" x2="76" y2="76" stroke="#10191d" strokeWidth="3" strokeLinecap="round" />}
+              {mood === "rough" && <path d="M63 78 q7 -4 14 0" stroke="#10191d" strokeWidth="3" fill="none" strokeLinecap="round" />}
+              {sprout}
+            </g>
+          </g>
+        </g>
+      </g>
+      {/* Shrinks as the body rises, which is what stops the float reading as
+          the whole drawing being scaled. */}
+      <g className="wf-parallax" style={{ transform: `translate(${bodyX * 0.5}px, 0)` }}>
+        <g className="wf-shadow">
+          <ellipse cx="70" cy="110" rx="30" ry="5" fill="#000" opacity="0.25" />
+        </g>
+      </g>
     </svg>
   );
 }

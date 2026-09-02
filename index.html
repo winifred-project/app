@@ -23,6 +23,56 @@
       }
       #root { min-height: 100dvh; }
       button, input, textarea, select { font: inherit; }
+
+      /* ---------------------------------------------------------------
+         CMP-6 / CMP-7 companion motion.
+         All four keyframes are driven by custom properties set per mood
+         on the SVG, so the tuning table lives in App.jsx next to the
+         other CMP-1 mood values rather than being split across files.
+         Everything animated here is transform or opacity, so it runs on
+         the compositor and triggers no layout, paint or React render.
+         --------------------------------------------------------------- */
+      @keyframes wf-breathe {
+        0%, 100% { transform: scale(1) translateY(0); }
+        50%      { transform: scale(var(--wf-breath-scale)) translateY(var(--wf-breath-rise)); }
+      }
+      @keyframes wf-glow {
+        0%, 100% { opacity: var(--wf-glow-lo); }
+        50%      { opacity: var(--wf-glow-hi); }
+      }
+      @keyframes wf-sway {
+        0%, 100% { transform: translateX(calc(var(--wf-sway) * -1)); }
+        50%      { transform: translateX(var(--wf-sway)); }
+      }
+      @keyframes wf-shadow {
+        0%, 100% { transform: scale(1); opacity: 1; }
+        50%      { transform: scale(var(--wf-shadow-scale)); opacity: 0.7; }
+      }
+      .wf-breathe, .wf-sway, .wf-shadow {
+        transform-box: fill-box;
+        transform-origin: 50% 100%;
+        will-change: transform;
+      }
+      .wf-shadow { transform-origin: 50% 50%; }
+      .wf-breathe { animation: wf-breathe var(--wf-breath-dur) ease-in-out infinite; }
+      .wf-glow    { animation: wf-glow var(--wf-breath-dur) ease-in-out infinite; }
+      .wf-shadow  { animation: wf-shadow var(--wf-breath-dur) ease-in-out infinite; }
+      /* Deliberately not a whole-number multiple of the breath, so the two
+         cycles drift against each other and the idle never visibly loops. */
+      .wf-sway    { animation: wf-sway var(--wf-sway-dur) ease-in-out infinite; }
+      /* CMP-7: the trailing transition is what makes the parallax read as a
+         look rather than a jump. The JS only ever sets a target. */
+      .wf-parallax { transition: transform 520ms cubic-bezier(0.22, 1, 0.36, 1); }
+      .wf-gaze     { transition: transform 380ms cubic-bezier(0.22, 1, 0.36, 1); }
+
+      /* NFR-9: no movement at all under reduced motion. The glow keeps a very
+         slow opacity fade, which is not motion and is the one cue that stops
+         the companion reading as a broken image. */
+      @media (prefers-reduced-motion: reduce) {
+        .wf-breathe, .wf-sway, .wf-shadow { animation: none !important; }
+        .wf-glow { animation-duration: 14s !important; }
+        .wf-parallax, .wf-gaze { transform: none !important; transition: none !important; }
+      }
     </style>
   </head>
   <body>
