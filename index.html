@@ -60,6 +60,35 @@
       /* Deliberately not a whole-number multiple of the breath, so the two
          cycles drift against each other and the idle never visibly loops. */
       .wf-sway    { animation: wf-sway var(--wf-sway-dur) ease-in-out infinite; }
+      /* CMP-8: the input-free baseline. Touch gaze only exists while a finger is
+         actually on the glass, which on a phone is a fraction of a second during
+         a scroll, so on its own it left the companion inert in ordinary use. The
+         wander is a drift of the whole body; the glance is the eyes moving on
+         their own, shorter and with holds in it so it darts and settles rather
+         than sliding. Both are CSS, so they cost nothing, stop when the app is
+         backgrounded and obey reduced motion without any JS involved.
+         Stops are deliberately irregular and the two periods share no common
+         factor with each other or with the breath, so the loop never surfaces. */
+      @keyframes wf-wander {
+        0%   { transform: translate(0, 0); }
+        17%  { transform: translate(var(--wf-wander-x), 0); }
+        31%  { transform: translate(calc(var(--wf-wander-x) * 0.3), calc(var(--wf-wander-y) * -1)); }
+        46%  { transform: translate(calc(var(--wf-wander-x) * -0.8), calc(var(--wf-wander-y) * 0.4)); }
+        63%  { transform: translate(calc(var(--wf-wander-x) * -0.2), var(--wf-wander-y)); }
+        79%  { transform: translate(calc(var(--wf-wander-x) * 0.6), calc(var(--wf-wander-y) * -0.3)); }
+        100% { transform: translate(0, 0); }
+      }
+      @keyframes wf-glance {
+        0%, 13%   { transform: translate(0, 0); }
+        18%, 29%  { transform: translate(var(--wf-glance-x), calc(var(--wf-glance-y) * -0.4)); }
+        34%, 47%  { transform: translate(calc(var(--wf-glance-x) * -0.9), 0); }
+        52%, 61%  { transform: translate(calc(var(--wf-glance-x) * 0.2), var(--wf-glance-y)); }
+        66%, 84%  { transform: translate(calc(var(--wf-glance-x) * -0.3), calc(var(--wf-glance-y) * -0.6)); }
+        89%, 100% { transform: translate(0, 0); }
+      }
+      .wf-wander { animation: wf-wander var(--wf-wander-dur) ease-in-out infinite; }
+      .wf-glance { animation: wf-glance var(--wf-glance-dur) ease-in-out infinite; }
+
       /* CMP-7: the trailing transition is what makes the parallax read as a
          look rather than a jump. The JS only ever sets a target. */
       .wf-parallax { transition: transform 520ms cubic-bezier(0.22, 1, 0.36, 1); }
@@ -69,7 +98,7 @@
          slow opacity fade, which is not motion and is the one cue that stops
          the companion reading as a broken image. */
       @media (prefers-reduced-motion: reduce) {
-        .wf-breathe, .wf-sway, .wf-shadow { animation: none !important; }
+        .wf-breathe, .wf-sway, .wf-shadow, .wf-wander, .wf-glance { animation: none !important; }
         .wf-glow { animation-duration: 14s !important; }
         .wf-parallax, .wf-gaze { transform: none !important; transition: none !important; }
       }
