@@ -1,5 +1,14 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { BUILD_ID, BUILD_DATE, isUpdateReady, onUpdateReady, checkForUpdate, applyUpdate } from "./updates.js";
+// DEV-1: time and place are parameters with the real ones as defaults. With no
+// override set, which is the only possibility in a production build, every one
+// of these returns what the ambient device would have returned.
+import {
+  nowMs, activeZone, hourIn, onDevClock,
+  dayKeyIn, weekStartIn, offsetMsAt, freezeLogDays,
+  nextDayKey, boundaryOfKey, weekdayOfKey, weekStartKeyIn, entryTime,
+  storeKey, isSandbox, LEGACY_KEYS, STATE_VERSION, backfillState, clampDaySeen,
+} from "./devclock.js";
 
 // Winifred v3: adds the AI setup wizard and trust layer.
 // New in v3: device capability detection, AI tier chooser (local / built-in /
@@ -7,8 +16,9 @@ import { BUILD_ID, BUILD_DATE, isUpdateReady, onUpdateReady, checkForUpdate, app
 // system prompt + output safety filter, crisis detection, on-device templated
 // dialogue engine, mock managed model download, transparency page, data export.
 
-const STORE_KEY = "winifred-state-v1";
-const LEGACY_KEYS = ["lastorders-state-v3"];
+// DAT-1: the versioned key lives in devclock.js so that the dev sandbox and the
+// app cannot disagree about which store is in use. Outside a dev build there is
+// only ever one answer, `winifred-state-v2`.
 // Kept out of the main state object on purpose: if the user wipes their
 // data (ONB-5) they have still installed the app, so the prompt should
 // not come back.
@@ -121,39 +131,42 @@ const defaultState = {
   predictions: [],
   lastOpen: null,
   lastSeenNote: null,
+  stateVersion: STATE_VERSION,
+  // TIM-4: the furthest day this install has ever seen.
+  maxDaySeen: null,
+  // TIM-6: the season's first day, so its length is never re-derived.
+  seasonStartDay: null,
   ai: { tier: null, cloudConsent: false, modelDownloaded: false },
 };
 
-function dayKey(t) { return new Date(t - 5 * HOUR).toDateString(); }
-function weekStart(now) {
-  const d = new Date(now - 5 * HOUR);
-  const monday = new Date(d);
-  monday.setDate(d.getDate() - ((d.getDay() + 6) % 7));
-  monday.setHours(0, 0, 0, 0);
-  return monday.getTime() + 5 * HOUR;
+function dayKey(t) { return dayKeyIn(t, activeZone()); }
+function weekStart(now) { return weekStartIn(now, activeZone()); }
+
+// TIM-1: a log entry's day was decided when it was logged and is never derived
+// again. The fallback exists only for an entry that somehow escaped the TIM-2
+// migration; it is not a supported state, and the migration is what guarantees
+// the field is there.
+function logDay(l) { return l.day || dayKeyIn(l.t, activeZone()); }
+
+// TIM-4: the current day never moves backwards. Crossing the date line westward
+// repeats a calendar date, which would otherwise recompute capacity over a
+// shorter span and file entries behind days the app has already closed.
+function effectiveDayKey(now, maxSeen) {
+  const raw = dayKeyIn(now, activeZone());
+  return maxSeen && maxSeen > raw ? maxSeen : raw;
 }
 // Mutators still rotate on calendar weeks (MUT-1); the health bar no longer does.
 function weekIndex(now) { return Math.floor(weekStart(now) / (7 * DAY)); }
 
 // BAR-4: the day boundary sits at 05:00 local, so a 1am drink belongs to the
-// night before. Computed from the local date rather than by dividing epoch ms,
-// so the boundary holds across a DST change (matches dayKey).
-function dayStart(t) {
-  const d = new Date(t - 5 * HOUR);
-  d.setHours(0, 0, 0, 0);
-  return d.getTime() + 5 * HOUR;
-}
-function addDays(boundaryMs, n) {
-  const d = new Date(boundaryMs - 5 * HOUR);
-  d.setDate(d.getDate() + n);
-  d.setHours(0, 0, 0, 0);
-  return d.getTime() + 5 * HOUR;
-}
-function dayLabel(boundaryMs, now) {
-  const today = dayStart(now);
-  if (boundaryMs === today) return "Today";
-  if (boundaryMs === addDays(today, -1)) return "Yesterday";
-  return new Date(boundaryMs).toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "short" });
+// night before. The boundary itself now lives in devclock.js (dayStartTrue,
+// TIM-5) and the app no longer computes one: everything here compares day keys,
+// which is what makes a day stable once it has been decided.
+function dayLabel(key, todayKey) {
+  if (key === todayKey) return "Today";
+  if (key === nextDayKey(todayKey, -1)) return "Yesterday";
+  return new Date(boundaryOfKey(key, activeZone()))
+    .toLocaleDateString("en-GB", { timeZone: activeZone(), weekday: "long", day: "numeric", month: "short" });
 }
 
 // BAR-4/BAR-5: capacity is a regenerating pool, not a calendar reset. It refills
@@ -181,7 +194,7 @@ function concentrationThreshold(budget) { return 3 * regenPerDay(budget); }
 function unitsByDay(logs) {
   const m = new Map();
   for (const l of logs) {
-    const k = dayStart(l.t);
+    const k = logDay(l);
     m.set(k, (m.get(k) || 0) + l.units);
   }
   return m;
@@ -192,14 +205,21 @@ function unitsByDay(logs) {
 // "capped at each step". Returns the whole timeline because the log screen
 // (DRK-10) must show figures that agree with the bar exactly, which means
 // reading them from the same walk rather than recomputing them.
-function capacityTimeline(logs, budget, now) {
+function capacityTimeline(logs, budget, now, maxSeen) {
   const cap = budget, floor = -budget, regen = regenPerDay(budget);
   const thresh = concentrationThreshold(budget);
-  const today = dayStart(now);
+  const today = effectiveDayKey(now, maxSeen);
   const out = [];
   if (!logs.length) return out;
   const perDay = unitsByDay(logs);
-  let cur = dayStart(Math.min(...logs.map((l) => l.t)));
+  // Earliest logged day. ISO date order is chronological order.
+  // Earliest logged day. ISO date order is chronological order.
+  let cur = [...perDay.keys()].sort()[0];
+  // A day later than today is not reached, and that is correct rather than
+  // lossy: capacity answers "as of now", and those units are counted the moment
+  // the day arrives. Reviewed as a possible silent loss and it is not one; the
+  // existing BAR-7 cases read capacity mid-weekend with Sunday already logged
+  // and would have broken had the walk run past today.
   if (cur > today) cur = today;
   let level = cap, first = true, prevConcentrated = false, guard = 0;
   while (cur <= today && guard++ < 4000) {
@@ -209,24 +229,31 @@ function capacityTimeline(logs, budget, now) {
     const drunk = perDay.get(cur) || 0;
     if (drunk) level = Math.max(floor, level - drunk);
     const concentrated = drunk >= thresh;
-    out.push({ t: cur, refill, drunk, after: level, concentrated, paused });
+    // `t` is the instant this day began, for labels and ordering only. `key` is
+    // what anything comparing days must use.
+    out.push({ key: cur, t: boundaryOfKey(cur, activeZone()), refill, drunk, after: level, concentrated, paused });
     prevConcentrated = concentrated;
     first = false;
-    cur = addDays(cur, 1);
+    cur = nextDayKey(cur, 1);
   }
   return out;
 }
 
-function capacityAt(logs, budget, now) {
-  const tl = capacityTimeline(logs, budget, now);
+function capacityAt(logs, budget, now, maxSeen) {
+  const tl = capacityTimeline(logs, budget, now, maxSeen);
   return tl.length ? tl[tl.length - 1].after : budget;
 }
 
 // Whether today's total has already forfeited tomorrow's refill (BAR-7).
-function refillPausedTomorrow(logs, budget, now) {
-  const today = (unitsByDay(logs).get(dayStart(now)) || 0);
+function refillPausedTomorrow(logs, budget, now, maxSeen) {
+  const today = (unitsByDay(logs).get(effectiveDayKey(now, maxSeen)) || 0);
   return today >= concentrationThreshold(budget);
 }
+// ---- end of pure day maths ----
+// The test harness slices everything between `function logDay` and this line and
+// evaluates it, so the tests exercise the shipped arithmetic rather than a copy
+// of it. Keep pure functions above this marker and anything with a dependency
+// below it.
 
 // ---- Quest generation from the user's life ----
 // QST-3: rejects alcohol-adjacent content, driving, blades and heights. "knife"
@@ -319,39 +346,65 @@ function seasonXP({ dryDays, cravings, bonus, mutator }) {
 function regionsFrom(xp) { return Math.min(28, Math.floor(xp / XP_PER_REGION)); }
 
 function useNow(intervalMs) {
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => { const id = setInterval(() => setNow(Date.now()), intervalMs); return () => clearInterval(id); }, [intervalMs]);
+  const [now, setNow] = useState(nowMs());
+  useEffect(() => { const id = setInterval(() => setNow(nowMs()), intervalMs); return () => clearInterval(id); }, [intervalMs]);
+  // Moving the dev clock must redraw immediately rather than at the next tick.
+  useEffect(() => onDevClock(() => setNow(nowMs())), []);
   return now;
+}
+
+// TIM-2: an explicit migration, not a defaults merge. DAT-1's merge supplies
+// static values for new fields and cannot derive a day per log entry from that
+// entry's timestamp, which is what freezing a day requires. It runs once, is
+// idempotent, and is shared by both ways state can arrive: loading from storage
+// and importing an export (DAT-3). Putting it only in the loader was the
+// original plan and would have left every imported history unmigrated, which is
+// precisely the path DAT-3 sanctions for device transfer.
+function migrateState(parsed) {
+  const s = {
+    ...JSON.parse(JSON.stringify(defaultState)), ...parsed,
+    ai: { ...defaultState.ai, ...(parsed.ai || {}) },
+    show: { ...defaultState.show, ...(parsed.show || {}) },
+    // Pre-chip-row saves: no type was ever chosen, so tick nothing rather than
+    // inheriting the fresh-install default and mislabelling their own drinks (DRK-7).
+    drinkTypes: Array.isArray(parsed.drinkTypes) ? parsed.drinkTypes : [],
+  };
+  // Every field is backfilled on its own and each step is idempotent, so this
+  // runs unconditionally rather than behind a version check. A version check
+  // was the first attempt and was wrong in a way no unit test caught: the merge
+  // above spreads defaultState first, and defaultState declares the current
+  // version, so a genuine v1 store arrived already claiming to be current and
+  // skipped its own migration. Driving the app in a browser is what found it.
+  // For anyone who never travelled the computed days match exactly what the
+  // live derivation was already returning, so nothing they see changes.
+  return withDaySeen(backfillState(s, activeZone()));
+}
+
+// TIM-4: the clamp itself lives in devclock.js so it can be tested directly.
+function withDaySeen(s) {
+  const next = clampDaySeen(s.maxDaySeen, dayKeyIn(nowMs(), activeZone()));
+  return next === s.maxDaySeen ? s : { ...s, maxDaySeen: next };
 }
 
 async function loadState() {
   let raw = null;
-  try { raw = localStorage.getItem(STORE_KEY); } catch (e) { /* unavailable */ }
-  if (!raw) {
+  try { raw = localStorage.getItem(storeKey()); } catch (e) { /* unavailable */ }
+  // A fresh sandbox starts empty rather than inheriting a legacy store.
+  if (!raw && !isSandbox()) {
     // Migrate data saved under the app's previous name.
     for (const k of LEGACY_KEYS) {
       try { const old = localStorage.getItem(k); if (old) { raw = old; break; } } catch (e) { /* unavailable */ }
     }
   }
   if (raw) {
-    try {
-      const parsed = JSON.parse(raw);
-      return {
-        ...defaultState, ...parsed,
-        ai: { ...defaultState.ai, ...(parsed.ai || {}) },
-        show: { ...defaultState.show, ...(parsed.show || {}) },
-        // Pre-chip-row saves: no type was ever chosen, so tick nothing rather than
-        // inheriting the fresh-install default and mislabelling their own drinks (DRK-7).
-        drinkTypes: Array.isArray(parsed.drinkTypes) ? parsed.drinkTypes : [],
-      };
-    } catch (e) { /* corrupted; fall through */ }
+    try { return migrateState(JSON.parse(raw)); } catch (e) { /* corrupted; fall through */ }
   }
-  return JSON.parse(JSON.stringify(defaultState));
+  return withDaySeen(JSON.parse(JSON.stringify(defaultState)));
 }
-async function saveState(s) { try { localStorage.setItem(STORE_KEY, JSON.stringify(s)); } catch (e) { /* session only */ } }
+async function saveState(s) { try { localStorage.setItem(storeKey(), JSON.stringify(s)); } catch (e) { /* session only */ } }
 
 function skyFor(now) {
-  const h = new Date(now).getHours();
+  const h = hourIn(now, activeZone());
   if (h >= 5 && h < 11) return { top: "#22343a", hint: "#e8b45c22" };
   if (h >= 11 && h < 17) return { top: "#1e3a42", hint: "#5fd1b51e" };
   if (h >= 17 && h < 22) return { top: "#2a2733", hint: "#e8845c22" };
@@ -868,9 +921,9 @@ export default function Winifred() {
 
   useEffect(() => {
     loadState().then((s) => {
-      if (!s.seasonStart) s.seasonStart = Date.now();
-      const away = s.lastOpen && Date.now() - s.lastOpen > 3 * DAY;
-      s.lastOpen = Date.now();
+      if (!s.seasonStart) s.seasonStart = nowMs();
+      const away = s.lastOpen && nowMs() - s.lastOpen > 3 * DAY;
+      s.lastOpen = nowMs();
       // Shown once after an update, and only to someone who was already
       // running an earlier build: a fresh install has nothing to catch up on.
       // Whatever the current note is, it counts as seen from here on, so a
@@ -913,7 +966,10 @@ export default function Winifred() {
 
   function update(patch) {
     setState((prev) => {
-      const next = typeof patch === "function" ? patch(prev) : { ...prev, ...patch };
+      const merged = typeof patch === "function" ? patch(prev) : { ...prev, ...patch };
+      // Every write is a chance to notice the day has moved on (TIM-4). Doing it
+      // here rather than in a render effect keeps it off the one-second tick.
+      const next = withDaySeen(merged);
       saveState(next);
       return next;
     });
@@ -926,13 +982,18 @@ export default function Winifred() {
   function scorePredictions(s) {
     let message = null;
     const preds = s.predictions.map((p) => {
-      if (p.scored || Date.now() < p.weekendEnd) return p;
-      const actual = s.logs.filter((l) => l.t >= p.weekendStartT && l.t < p.weekendEnd).reduce((a, l) => a + l.units, 0);
+      if (p.scored || nowMs() < p.weekendEnd) return p;
+      // Scored against the frozen days, so a drink belongs to the weekend if the
+      // night it happened on does, whatever the offset was at either end.
+      const from = p.weekendKey, to = p.weekendEndKey;
+      const actual = s.logs.filter((l) => (
+        from && to ? logDay(l) >= from && logDay(l) < to : l.t >= p.weekendStartT && l.t < p.weekendEnd
+      )).reduce((a, l) => a + l.units, 0);
       const diff = Math.abs(actual - p.predicted);
       let bonus = 0, verdict = "Way off. Interesting, that.";
       if (diff <= 1) { bonus = 30; verdict = "Oracle. Within one unit."; }
       else if (diff <= 3) { bonus = 15; verdict = "Close. Within three units."; }
-      if (bonus) s.bonusXP = [...s.bonusXP, { t: Date.now(), amount: bonus, reason: "prediction" }];
+      if (bonus) s.bonusXP = [...s.bonusXP, { t: nowMs(), amount: bonus, reason: "prediction" }];
       message = `Weekend forecast scored: predicted ${p.predicted}u, actual ${actual.toFixed(1)}u. ${verdict}${bonus ? ` +${bonus} XP.` : ""}`;
       return { ...p, scored: true, actual };
     });
@@ -944,7 +1005,7 @@ export default function Winifred() {
   const minuteTick = Math.floor(now / 60000);
   useEffect(() => {
     if (!state) return;
-    if (state.predictions.some((p) => !p.scored && Date.now() >= p.weekendEnd)) {
+    if (state.predictions.some((p) => !p.scored && nowMs() >= p.weekendEnd)) {
       const scored = scorePredictions({ ...state, bonusXP: [...state.bonusXP] });
       setState(scored.state);
       saveState(scored.state);
@@ -956,18 +1017,19 @@ export default function Winifred() {
   // BAR-4: hoisted above the loading guard on purpose. This is a hook, and the
   // guard below returns early on the first render, so computing capacity in the
   // derived block would change the hook count between renders (React #310).
-  const todayStart = dayStart(now);
+  const maxDaySeen = state && state.maxDaySeen;
+  const todayK = effectiveDayKey(now, maxDaySeen);
   const pausedTomorrow = useMemo(
-    () => (state ? refillPausedTomorrow(state.logs, state.budget, now) : false),
+    () => (state ? refillPausedTomorrow(state.logs, state.budget, now, maxDaySeen) : false),
     // eslint-disable-next-line
-    [state && state.logs, state && state.budget, todayStart]
+    [state && state.logs, state && state.budget, todayK]
   );
   const capacity = useMemo(
-    () => (state ? capacityAt(state.logs, state.budget, now) : 0),
+    () => (state ? capacityAt(state.logs, state.budget, now, maxDaySeen) : 0),
     // Recomputed when a drink is logged or removed, when the budget moves, and
     // once per 05:00 boundary; not on the whole-app one-second tick.
     // eslint-disable-next-line
-    [state && state.logs, state && state.budget, todayStart]
+    [state && state.logs, state && state.budget, todayK]
   );
 
   if (!state) {
@@ -980,18 +1042,30 @@ export default function Winifred() {
   // daily (BAR-4), so a calendar week no longer means anything to it; mixing a
   // calendar total with a rolling companion mood is what made the old bar read
   // as an amnesty every Monday.
-  const last7 = state.logs.filter((l) => l.t >= now - 7 * DAY);
+  // The window is seven day keys, not 168 absolute hours. A rolling millisecond
+  // window sheds its oldest day partway through an evening, so at 23:00 the
+  // home-screen units, kcal, spend and the companion's mood would all drop by a
+  // day's worth while the bar, which walks days, did not move. MET-4 exists to
+  // stop exactly that disagreement, and a timestamp filter reintroduced it.
+  const windowStart = nextDayKey(todayK, -6);
+  const last7 = state.logs.filter((l) => logDay(l) >= windowStart);
   const usedUnits = last7.reduce((a, l) => a + l.units, 0);
   const weekSpend = last7.reduce((a, l) => a + l.cost, 0);
   const mood = moodFrom(usedUnits / Math.max(1, state.budget));
   const mutator = mutatorFor(now);
-  const dow = (new Date(now - 5 * HOUR).getDay() + 6) % 7;
+  const dow = (weekdayOfKey(todayK) + 6) % 7;
   const isSunday = dow === 6;
 
   const seasonDayNum = Math.min(28, Math.floor((now - state.seasonStart) / DAY) + 1);
-  const seasonLogsDays = new Set(state.logs.filter((l) => l.t >= state.seasonStart).map((l) => dayKey(l.t)));
+  // TIM-6: days are enumerated by stepping the day key. Adding 24 hours to the
+  // season's start drifts an hour at a clock change, and where the season began
+  // within an hour of 05:00 that slid a step back across the boundary: ten steps
+  // from 05:30 on 20 October gave nine distinct days, so a dry day and the XP it
+  // earned simply vanished.
+  const seasonStartKey = state.seasonStartDay || dayKey(state.seasonStart);
+  const seasonLogsDays = new Set(state.logs.filter((l) => l.t >= state.seasonStart).map(logDay));
   let dryDays = 0;
-  for (let i = 0; i < seasonDayNum - 1; i++) if (!seasonLogsDays.has(dayKey(state.seasonStart + i * DAY))) dryDays++;
+  for (let i = 0; i < seasonDayNum - 1; i++) if (!seasonLogsDays.has(nextDayKey(seasonStartKey, i))) dryDays++;
   const seasonCravings = state.cravingsWon.filter((c) => c.t >= state.seasonStart);
   const seasonBonus = state.bonusXP.filter((b) => b.t >= state.seasonStart).reduce((a, b) => a + b.amount, 0);
   const xp = seasonXP({ dryDays, cravings: seasonCravings, bonus: seasonBonus, mutator });
@@ -999,12 +1073,25 @@ export default function Winifred() {
   const xpToNext = (revealed + 1) * XP_PER_REGION - xp;
   const seasonOver = seasonDayNum >= 28;
 
-  const satStart = ws + 5 * DAY, monEnd = ws + 7 * DAY;
-  const thisWeekendPred = state.predictions.find((p) => p.weekendStartT === satStart);
+  // TIM-6: stepped from the week's Monday, never offset by multiples of 24
+  // hours. Six weekends in three years contain a clock change, and the old
+  // arithmetic scored those against a 47- or 49-hour window.
+  const wsKey = weekStartKeyIn(now, activeZone());
+  const satKey = nextDayKey(wsKey, 5), monKey = nextDayKey(wsKey, 7);
+  const satStart = boundaryOfKey(satKey, activeZone()), monEnd = boundaryOfKey(monKey, activeZone());
+  // TIM-6: matched on the key stored when the prediction was locked, not on a
+  // boundary recomputed now. Recomputing means a user who locks a forecast in
+  // one place and opens the app in another stops finding their own prediction.
+  const weekendKey = satKey;
+  const thisWeekendPred = state.predictions.find(
+    (p) => (p.weekendKey ? p.weekendKey === weekendKey : p.weekendStartT === satStart)
+  );
   const canPredict = now < satStart && !thisWeekendPred;
 
   function logDrink(d) {
-    update({ logs: [...state.logs, { t: Date.now(), ...d }] });
+    const t = nowMs();
+    // TIM-1: decided here, once, and never derived again.
+    update({ logs: [...state.logs, { t, day: todayK, tzo: Math.round(offsetMsAt(t, activeZone()) / 60000), ...d }] });
     say(`Logged: ${d.label}. ${state.companionName} noticed, and moved on.`);
   }
   // DRK-10: removal is per entry, not blind last-only. Historical entries keep
@@ -1014,11 +1101,11 @@ export default function Winifred() {
     say("Removed. The ledger is yours to correct.");
   }
   function winCraving({ embers = 0, viaQuest = false }) {
-    const late = new Date().getHours() >= 20;
+    const late = hourIn(nowMs(), activeZone()) >= 20;
     let bonus = [];
-    if (embers > 0) bonus.push({ t: Date.now(), amount: Math.min(20, embers), reason: "embers" });
-    if (viaQuest && mutator.questBonus) bonus.push({ t: Date.now(), amount: mutator.questBonus, reason: "quest" });
-    update((prev) => ({ ...prev, cravingsWon: [...prev.cravingsWon, { t: Date.now(), late }], bonusXP: [...prev.bonusXP, ...bonus] }));
+    if (embers > 0) bonus.push({ t: nowMs(), amount: Math.min(20, embers), reason: "embers" });
+    if (viaQuest && mutator.questBonus) bonus.push({ t: nowMs(), amount: mutator.questBonus, reason: "quest" });
+    update((prev) => ({ ...prev, cravingsWon: [...prev.cravingsWon, { t: nowMs(), late }], bonusXP: [...prev.bonusXP, ...bonus] }));
     setScreen("home");
     const worth = late && mutator.lateCravingXP > mutator.cravingXP ? mutator.lateCravingXP : mutator.cravingXP;
     // SSN-6: only claim the fog moved when a region actually cleared. Saying it
@@ -1031,11 +1118,14 @@ export default function Winifred() {
     say(`Craving defeated${viaQuest ? " by quest" : ""}. +${worth} XP${bonus.length ? ` and +${bonus.reduce((a, b) => a + b.amount, 0)} bonus` : ""}. ${fog}`);
   }
   function lockPrediction(n) {
-    update({ predictions: [...state.predictions, { weekendStartT: satStart, weekendEnd: monEnd, predicted: n, scored: false }] });
+    // The window's bounds are stored now and never recomputed at scoring time
+    // (TIM-6), so travelling mid-weekend cannot change the window the user is
+    // marked against.
+    update({ predictions: [...state.predictions, { weekendKey, weekendEndKey: monKey, weekendStartT: satStart, weekendEnd: monEnd, predicted: n, scored: false }] });
     say(`Forecast locked: ${n} units this weekend. Calibration pays better than restraint here.`);
   }
   function newSeason() {
-    update({ seasonStart: Date.now(), prestige: state.prestige + 1, bonusXP: [] });
+    update({ seasonStart: nowMs(), seasonStartDay: todayK, prestige: state.prestige + 1, bonusXP: [] });
     setScreen("home");
     say(`Season banked. Permanent rank ${state.prestige + 1}. The map refogs; the rank never fades.`);
   }
@@ -1106,7 +1196,7 @@ export default function Winifred() {
             {state.futureNotes.length > 0 && <p style={{ fontSize: 12.5, color: palette.bar }}>{state.futureNotes.length} note{state.futureNotes.length > 1 ? "s" : ""} sealed. They only open during a craving.</p>}
           </div>
           <div style={{ marginTop: 16 }}>
-            <BigButton tone="warm" onClick={() => { update({ onboarded: true, seasonStart: Date.now() }); setScreen("drinks-setup"); }}>Next: your usual drinks</BigButton>
+            <BigButton tone="warm" onClick={() => { update({ onboarded: true, seasonStart: nowMs(), seasonStartDay: todayK }); setScreen("drinks-setup"); }}>Next: your usual drinks</BigButton>
           </div>
           <p style={{ fontSize: 12, color: palette.inkDim, lineHeight: 1.5, marginTop: 14 }}>Everything stays on this device. If stopping suddenly gives you shakes or sweats, speak to a GP before cutting down; this game is not for withdrawal.</p>
         </div>
@@ -1172,6 +1262,7 @@ export default function Winifred() {
         show={state.show}
         blind={mutator.blind && !isSunday}
         now={now}
+        todayKey={todayK}
         onRemove={removeLog}
         onBack={() => setScreen("home")}
       />
@@ -1252,15 +1343,10 @@ export default function Winifred() {
                         say("That doesn't look like a Winifred export.");
                         return;
                       }
-                      const restored = {
-                        ...JSON.parse(JSON.stringify(defaultState)),
-                        ...parsed,
-                        ai: { ...defaultState.ai, ...(parsed.ai || {}) },
-                        show: { ...defaultState.show, ...(parsed.show || {}) },
-                        drinkTypes: Array.isArray(parsed.drinkTypes) ? parsed.drinkTypes : [],
-                        onboarded: true,
-                        lastOpen: Date.now(),
-                      };
+                      // The same migration the loader runs (TIM-2): an import is
+                      // the sanctioned path for device transfer and origin change
+                      // (DAT-3), so it cannot be the path that skips it.
+                      const restored = { ...migrateState(parsed), onboarded: true, lastOpen: nowMs() };
                       setState(restored);
                       saveState(restored);
                       say(`Imported: ${restored.logs.length} drinks, ${restored.cravingsWon.length} cravings beaten, season intact. Welcome home.`);
@@ -1289,7 +1375,7 @@ export default function Winifred() {
             </div>
 
             <div style={{ marginTop: 10 }}>
-              <BigButton tone="ghost" onClick={() => { const fresh = { ...JSON.parse(JSON.stringify(defaultState)), lastOpen: Date.now() }; setState(fresh); saveState(fresh); setScreen("setup"); say("Fresh start. The companion remembers nothing."); }}>Delete everything and start again</BigButton>
+              <BigButton tone="ghost" onClick={() => { const fresh = { ...JSON.parse(JSON.stringify(defaultState)), lastOpen: nowMs() }; setState(fresh); saveState(fresh); setScreen("setup"); say("Fresh start. The companion remembers nothing."); }}>Delete everything and start again</BigButton>
             </div>
           </div>
         </div>
@@ -1860,8 +1946,8 @@ function QuestSuggester({ tier, cloudConsent, profile, onProfile, deck, onAddQue
 // are collapsed into one line each so the restoring days are legible rather than
 // a wall of empty rows.
 // =====================================================================
-function LogScreen({ shell, card, logs, budget, capacity, show, blind, now, onRemove, onBack }) {
-  const today = dayStart(now);
+function LogScreen({ shell, card, logs, budget, capacity, show, blind, now, todayKey, onRemove, onBack }) {
+  const today = todayKey;
   const regen = regenPerDay(budget);
 
   // Figures here come from the same walk that drives the bar (capacityTimeline),
@@ -1871,19 +1957,21 @@ function LogScreen({ shell, card, logs, budget, capacity, show, blind, now, onRe
     if (!logs.length) return [];
     const byDay = new Map();
     for (const l of logs) {
-      const k = dayStart(l.t);
+      const k = logDay(l);
       if (!byDay.has(k)) byDay.set(k, []);
       byDay.get(k).push(l);
     }
-    const tl = new Map(capacityTimeline(logs, budget, now).map((r) => [r.t, r]));
-    const first = dayStart(Math.min(...logs.map((l) => l.t)));
+    // The timeline is keyed by day, so a row here and the bar it explains cannot
+    // drift apart even if the reader is in a different place from the logger.
+    const tl = new Map(capacityTimeline(logs, budget, now, today).map((r) => [r.key, r]));
+    const first = [...byDay.keys()].sort()[0];
     const out = [];
     let cur = today, guard = 0;
     while (cur >= first && guard++ < 400) {
       const rec = tl.get(cur) || { refill: 0, concentrated: false, paused: false, after: 0 };
       const entries = byDay.get(cur);
       if (entries) {
-        out.push({ kind: "day", t: cur, rec, entries: entries.slice().sort((a, b) => b.t - a.t) });
+        out.push({ kind: "day", key: cur, rec, entries: entries.slice().sort((a, b) => b.t - a.t) });
       } else {
         const last = out[out.length - 1];
         if (last && last.kind === "dry") {
@@ -1891,10 +1979,10 @@ function LogScreen({ shell, card, logs, budget, capacity, show, blind, now, onRe
           last.restored += rec.refill;
           if (rec.paused) last.paused += 1;
         } else {
-          out.push({ kind: "dry", t: cur, count: 1, restored: rec.refill, paused: rec.paused ? 1 : 0 });
+          out.push({ kind: "dry", key: cur, count: 1, restored: rec.refill, paused: rec.paused ? 1 : 0 });
         }
       }
-      cur = addDays(cur, -1);
+      cur = nextDayKey(cur, -1);
     }
     return out;
     // eslint-disable-next-line
@@ -1944,7 +2032,7 @@ function LogScreen({ shell, card, logs, budget, capacity, show, blind, now, onRe
         {days.map((g, gi) => {
           if (g.kind === "dry") {
             return (
-              <div key={`dry-${g.t}-${gi}`} style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 4px", color: palette.inkDim, fontSize: 13.5 }}>
+              <div key={`dry-${g.key}-${gi}`} style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 4px", color: palette.inkDim, fontSize: 13.5 }}>
                 <span style={{ flex: 1, height: 1, background: palette.line }} />
                 <span>
                   {g.count} {g.count === 1 ? "day" : "days"} with nothing logged
@@ -1963,9 +2051,9 @@ function LogScreen({ shell, card, logs, budget, capacity, show, blind, now, onRe
             show.money ? `£${cost.toFixed(2)}` : null,
           ].filter(Boolean).join(" · ");
           return (
-            <div key={g.t} style={{ ...card, marginTop: 12, padding: 14 }}>
+            <div key={g.key} style={{ ...card, marginTop: 12, padding: 14 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, marginBottom: 8 }}>
-                <strong style={{ fontSize: 15.5 }}>{dayLabel(g.t, now)}</strong>
+                <strong style={{ fontSize: 15.5 }}>{dayLabel(g.key, today)}</strong>
                 <span style={{ fontSize: 13, color: palette.inkDim }}>{subtotal || `${g.entries.length} logged`}</span>
               </div>
               {/* BAR-7, shown as the arithmetic it is, in the dim ink rather than
@@ -1982,7 +2070,11 @@ function LogScreen({ shell, card, logs, budget, capacity, show, blind, now, onRe
                 {g.entries.map((l) => (
                   <div key={l.t} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderTop: `1px solid ${palette.line}` }}>
                     <span style={{ fontSize: 13, color: palette.inkDim, fontVariantNumeric: "tabular-nums", minWidth: 42 }}>
-                      {new Date(l.t).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}
+                      {/* TIM-7: shown in the place it was logged, with the offset
+                          named when that differs from the reader's. An unqualified
+                          formatter renders a 02:00 Sydney drink as 17:00 to a
+                          reader in London, which is a true number made misleading. */}
+                      {entryTime(l, activeZone())}
                     </span>
                     <span style={{ flex: 1, minWidth: 0 }}>
                       <span style={{ fontSize: 14.5, color: palette.ink }}>{l.label}</span>
@@ -2202,12 +2294,16 @@ function RecapScreen({ shell, card, state, dryDays, xp, revealed, seasonCravings
   const spend = seasonLogs.reduce((a, l) => a + l.cost, 0);
   const units = seasonLogs.reduce((a, l) => a + l.units, 0);
   const byDay = {};
-  seasonLogs.forEach((l) => { const d = new Date(l.t - 5 * HOUR).toLocaleDateString("en-GB", { weekday: "long" }); byDay[d] = (byDay[d] || 0) + l.units; });
+  // The nemesis weekday reads the frozen day, so a Saturday abroad stays a
+  // Saturday in the recap rather than becoming a Sunday on the flight home.
+  const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  seasonLogs.forEach((l) => { const d = WEEKDAYS[weekdayOfKey(logDay(l))]; byDay[d] = (byDay[d] || 0) + l.units; });
   const nemesis = Object.entries(byDay).sort((a, b) => b[1] - a[1])[0];
   let run = 0, best = 0;
-  const logDays = new Set(seasonLogs.map((l) => dayKey(l.t)));
+  const seasonStartKey = state.seasonStartDay || dayKey(state.seasonStart);
+  const logDays = new Set(seasonLogs.map(logDay));
   for (let i = 0; i < seasonDayNum; i++) {
-    if (!logDays.has(dayKey(state.seasonStart + i * DAY))) { run++; best = Math.max(best, run); } else run = 0;
+    if (!logDays.has(nextDayKey(seasonStartKey, i))) { run++; best = Math.max(best, run); } else run = 0;
   }
   const preds = state.predictions.filter((p) => p.scored);
   const avgMiss = preds.length ? (preds.reduce((a, p) => a + Math.abs(p.actual - p.predicted), 0) / preds.length).toFixed(1) : null;
