@@ -1844,7 +1844,7 @@ function NoteInput({ onAdd, placeholder = "Write it, then seal it" }) {
   const [v, setV] = useState("");
   return (
     <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-      <input value={v} onChange={(e) => setV(e.target.value)} placeholder={placeholder} style={{ flex: 1, background: "#0b1215", color: palette.ink, border: `1px solid ${palette.line}`, borderRadius: 10, padding: "10px 12px", fontSize: 14, fontFamily: "inherit" }} />
+      <input value={v} onChange={(e) => setV(e.target.value)} placeholder={placeholder} style={{ flex: 1, background: "#0b1215", color: palette.ink, border: `1px solid ${palette.line}`, borderRadius: 10, padding: "10px 12px", fontSize: 16, fontFamily: "inherit" }} />
       <button onClick={() => { if (v.trim()) { onAdd(v.trim()); setV(""); } }} style={{ background: palette.panelSoft, color: palette.ink, border: `1px solid ${palette.line}`, borderRadius: 10, padding: "0 14px", cursor: "pointer", fontFamily: "inherit", fontWeight: 600 }}>Seal</button>
     </div>
   );
@@ -1863,7 +1863,9 @@ function DrinkEditor({ drinks, onChange, say, types = [], onTypes }) {
   const [cost, setCost] = useState(2.5);
   const liveUnits = unitsFrom(Number(ml) || 0, Number(abv) || 0);
 
-  const field = { background: "#0b1215", color: palette.ink, border: `1px solid ${palette.line}`, borderRadius: 10, padding: "10px 12px", fontSize: 14, fontFamily: "inherit", width: "100%", boxSizing: "border-box" };
+  // 16px is a floor, not a taste: iOS zooms the page in when a control under
+  // it takes focus, and the zoom persists after the field is dismissed.
+  const field = { background: "#0b1215", color: palette.ink, border: `1px solid ${palette.line}`, borderRadius: 10, padding: "10px 12px", fontSize: 16, fontFamily: "inherit", width: "100%", boxSizing: "border-box" };
   const small = { fontSize: 12, color: palette.inkDim, display: "block", marginBottom: 4 };
 
   // DRK-7: ticking seeds a type's two generic buttons, unticking removes only
@@ -2005,7 +2007,7 @@ function QuestSuggester({ tier, cloudConsent, profile, onProfile, deck, onAddQue
         onChange={(e) => onProfile(e.target.value)}
         placeholder="e.g. House with a garden, a dog called Biscuit, into cycling and cooking, shed needs sorting"
         rows={3}
-        style={{ width: "100%", boxSizing: "border-box", background: "#0b1215", color: palette.ink, border: `1px solid ${palette.line}`, borderRadius: 10, padding: "10px 12px", fontSize: 14, fontFamily: "inherit", resize: "vertical" }}
+        style={{ width: "100%", boxSizing: "border-box", background: "#0b1215", color: palette.ink, border: `1px solid ${palette.line}`, borderRadius: 10, padding: "10px 12px", fontSize: 16, fontFamily: "inherit", resize: "vertical" }}
       />
       <div style={{ marginTop: 8 }}>
         <BigButton tone="quiet" onClick={generate} disabled={busy} style={{ padding: "10px 14px", fontSize: 14 }}>
@@ -2271,7 +2273,7 @@ function ChatScreen({ shell, card, name, mood, tier, getReply, onBack }) {
           <div ref={endRef} />
         </div>
         <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-          <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} placeholder={`Say something to ${name}`} style={{ flex: 1, background: "#0b1215", color: palette.ink, border: `1px solid ${palette.line}`, borderRadius: 12, padding: "12px 14px", fontSize: 15, fontFamily: "inherit" }} />
+          <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} placeholder={`Say something to ${name}`} style={{ flex: 1, background: "#0b1215", color: palette.ink, border: `1px solid ${palette.line}`, borderRadius: 12, padding: "12px 14px", fontSize: 16, fontFamily: "inherit" }} />
           <button onClick={() => send()} disabled={busy} style={{ background: palette.accent, color: "#231a08", border: "none", borderRadius: 12, padding: "0 18px", fontWeight: 700, cursor: "pointer", fontFamily: "inherit", opacity: busy ? 0.5 : 1 }}>Send</button>
         </div>
       </div>
