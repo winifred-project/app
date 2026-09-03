@@ -3,6 +3,8 @@ name: Deploy to GitHub Pages
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -25,14 +27,25 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      # The harness is the only thing standing behind R-5: the CHT-4/5/6 crisis
+      # and permission-giving screens, QST-3's quest filter and the BAR-6 copy
+      # constraints all live in it. Before this step it ran only when somebody
+      # remembered to run it, while every push to main deployed whatever
+      # compiled. A build succeeding is not the same as an app that runs, which
+      # this repo has already demonstrated once.
+      - run: npm test
       - run: npm run build
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
 
+  # Pull requests run the build job for its tests and stop there; only a push to
+  # main publishes. Catching a failure at the pull request is the point, since a
+  # gate that fires after the merge is reporting on a main that is already broken.
   deploy:
     needs: build
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
