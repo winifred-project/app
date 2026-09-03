@@ -201,24 +201,31 @@ group("BAR-9 the refill is observable, not merely correct");
 ok("the bar is handed what was restored", src.includes("restored={restoredToday}"));
 ok("the figure comes from the same walk as the bar", src.includes("refillToday(state.logs, state.budget, now, maxDaySeen)"));
 {
-  // The growth belongs on the explainer screen, not on mount. On the home screen
-  // it fired two frames after mount, which on a phone is spent behind the PWA's
-  // splash-to-app transition: it ran, recorded itself as shown, and was never
-  // seen. Assert the arrangement rather than the intent, since the intent was
-  // what was wrong.
+  // The bar carries the refill on two channels, not three. The growth animation
+  // was removed rather than relocated a third time: it was built to fire on the
+  // morning after, two placements spent it where nobody was looking, and by the
+  // time it was visible it was the fifth telling of one fact. Assert the absence
+  // directly, because the intent was the thing that kept being wrong.
+  const bar = src.slice(src.indexOf("function HealthBar("));
+  const barBody = bar.slice(0, bar.indexOf("\nfunction "));
+  ok("the bar takes no animate prop", !/animate/.test(barBody));
+  ok("no growth transform survives", !/scaleX\(/.test(barBody) && !/transformOrigin/.test(barBody));
+  ok("and it needs no reduced-motion gate of its own", !/usePrefersReducedMotion/.test(barBody));
+  ok("the fill still transitions on width when a drink is logged",
+    barBody.includes('transition: "width 500ms ease"'));
   const home = src.slice(src.indexOf("<HealthBar capacity={capacity} budget={state.budget}"));
   const homeTag = home.slice(0, home.indexOf("/>"));
-  ok("the home screen bar does not animate", !/animate/.test(homeTag));
-  ok("and still carries the band and the figure", /restored={restoredToday}/.test(homeTag));
+  ok("the home screen bar carries the band and the figure", /restored={restoredToday}/.test(homeTag));
   const exp = src.slice(src.indexOf("<HealthBar capacity={capacity} budget={budget}"));
   const expTag = exp.slice(0, exp.indexOf("/>"));
-  ok("the explainer screen bar does animate", /\banimate\b/.test(expTag));
-  ok("and needs no once-a-day flag, because every visit is a fresh mount",
-    !/lastRefillShownDay/.test(src));
+  ok("the explainer shows the same bar, from the same render", /restored={restored}/.test(expTag));
+  ok("no once-a-day flag survives anywhere", !/lastRefillShownDay/.test(src));
   ok("the explainer offers no link back to itself", !/onExplain/.test(expTag));
 }
-ok("NFR-9: the growth is a transform, not a width", /transform: grow \?/.test(src) && /scaleX\(/.test(src));
-ok("NFR-9: reduced motion skips it", src.includes("landed && animate && !reduced"));
+// This was one animation removed, not a policy on animation: the companion still
+// moves, and still stops under reduced motion (CMP-6 to CMP-9, NFR-9).
+ok("the companion keeps its motion", /wf-breathe|wf-sway|wf-wander|wf-blink/.test(src));
+ok("and still respects reduced motion", src.includes("usePrefersReducedMotion()"));
 ok("NFR-4: the restored figure is in words, not only in a tint", src.includes("back today`"));
 ok("and in the accessible name", src.includes("units restored at 05:00 today"));
 ok("MET-5: it rides in the header row, which has the spare width", src.includes("<span>Capacity{cameBack}</span>"));

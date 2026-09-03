@@ -820,7 +820,7 @@ function Companion({ mood, size = 180 }) {
 // a calendar boundary. BAR-6: the copy stays behavioural. Regeneration at budget/7
 // is a game abstraction chosen so that a steady 2 units a day breaks even; it is not
 // a claim about how a body recovers, and nothing here may imply one.
-function HealthBar({ capacity, budget, blind, isSunday, onExplain, pausedTomorrow, restored = 0, animate = false }) {
+function HealthBar({ capacity, budget, blind, isSunday, onExplain, pausedTomorrow, restored = 0 }) {
   const pct = Math.max(0, Math.min(1, capacity / budget));
   const over = capacity < 0 ? -capacity : 0;
   const color = pct > 0.5 ? palette.bar : pct > 0.15 ? palette.barLow : palette.barGone;
@@ -833,34 +833,34 @@ function HealthBar({ capacity, budget, blind, isSunday, onExplain, pausedTomorro
   // BAR-9: a refill lands at an hour nobody is awake for, into the same pool the
   // drinking drains, so by morning one number carries both and says neither. The
   // figure is named in the copy whenever it is known, including in debt, because
-  // a tint cannot carry a number (NFR-4). The band and the growth need somewhere
-  // to grow from, which debt has not got: a receding hatch cannot show a gain
-  // arriving from the left, so below zero the copy carries it alone.
+  // a tint cannot carry a number (NFR-4). The band needs a fill to sit inside,
+  // which debt has not got: a receding hatch cannot show a gain arriving from
+  // the left, so below zero the copy carries it alone.
   const shown = !hidden && restored > 0.05;
   const landed = shown && capacity > 0;
-  // Expressed as a fraction of the fill rather than of the track, so it scales
-  // with the fill during the growth instead of floating past its edge. Clamped
-  // at 1: a morning that restored more than is now left means the rest was drunk
-  // after it landed, and all of what remains did come back, so a full band is
-  // the honest drawing.
+  // Expressed as a fraction of the fill rather than of the track, so it tracks
+  // the fill's edge as capacity changes rather than needing recomputing against
+  // it. Clamped at 1: a morning that restored more than is now left means the
+  // rest was drunk after it landed, and all of what remains did come back, so a
+  // full band is the honest drawing.
   const slice = landed ? Math.max(0, Math.min(1, restored / capacity)) : 0;
 
-  // NFR-9: the growth is a transform, so an otherwise idle screen pays no layout
-  // for it. Reduced motion skips it outright and loses nothing, since the band,
-  // the hairline and the copy carry the same fact without it.
-  const reduced = usePrefersReducedMotion();
-  const play = landed && animate && !reduced;
-  const [grow, setGrow] = useState(play);
-  useEffect(() => {
-    if (!play) { setGrow(false); return; }
-    setGrow(true);
-    // Two frames, not one: React commits the mount and runs this effect inside
-    // the same paint, so a single frame would flip the transform before the
-    // pre-refill width had ever been drawn and there would be nothing to watch.
-    let a = 0, b = 0;
-    a = requestAnimationFrame(() => { b = requestAnimationFrame(() => setGrow(false)); });
-    return () => { cancelAnimationFrame(a); cancelAnimationFrame(b); };
-  }, [play]);
+  // BAR-9 had a third channel here, a growth animation from the pre-refill point
+  // to the current width, and it is deliberately gone rather than relocated a
+  // third time. It was built to fire on the morning after, which is the moment
+  // the question "where did my 2.0 go?" actually occurs, and that is what made
+  // it worth its code. Two placements failed: two frames after the home-screen
+  // bar mounts is spent behind the PWA's splash-to-app transition, and the foot
+  // of the explainer card sat below that screen's own fold. Moved to the top of
+  // the explainer it was finally visible and by then pointless, being the fifth
+  // telling of one fact on a screen whose header, band, hairline, caption and
+  // prose all already carry it, to a reader who tapped through to be told. A
+  // bar that grows upward as you arrive also carries a faint "well done" that
+  // NFR-6 bans, a risk worth taking for legibility on the home screen and worth
+  // nothing here. The band, the hairline, the header figure and the dated
+  // caption are what make the refill legible, and BAR-9 always required them to
+  // work without any movement. The companion's own motion (CMP-6 to CMP-9) is
+  // untouched: this is one animation removed, not a policy on animation.
 
   // BAR-6/TIM-5: 05:00 is the hour that actually applies on all 365 days, and
   // naming the day as well is the point. "+2.0 back at 05:00" on its own read as
@@ -896,13 +896,11 @@ function HealthBar({ capacity, budget, blind, isSunday, onExplain, pausedTomorro
         ) : (
           <div style={{
             width: `${pct * 100}%`, height: "100%", background: `linear-gradient(90deg, ${color}, ${color}cc)`,
+            // Positioned and clipped for the band inside it, not for any
+            // animation: the width transition here is the pre-existing one that
+            // runs when a drink is logged.
             borderRadius: 9, position: "relative", overflow: "hidden",
-            // BAR-9: the growth runs on the transform and the drink-logging
-            // shrink still runs on the width, which is a pre-existing debt
-            // rather than a new one; the two never fire in the same frame.
-            transformOrigin: "left center",
-            transform: grow ? `scaleX(${Math.max(0, 1 - slice)})` : "scaleX(1)",
-            transition: "width 500ms ease, transform 900ms cubic-bezier(.22,.72,.2,1)",
+            transition: "width 500ms ease",
           }}>
             {slice > 0 && (
               <>
@@ -1115,8 +1113,7 @@ export default function Winifred() {
   );
   // BAR-9: what landed at this morning's boundary. Read from the same walk as
   // `capacity`, so the figure in the copy and the width of the bar cannot
-  // disagree. The home screen never animates it: the growth lives on the
-  // explainer screen instead, for the reason recorded in BAR-9.
+  // disagree.
   const restoredToday = useMemo(
     () => (state ? refillToday(state.logs, state.budget, now, maxDaySeen) : 0),
     // eslint-disable-next-line
@@ -2091,20 +2088,13 @@ function LogScreen({ shell, card, logs, budget, capacity, restored, pausedTomorr
         </p>
 
         <div style={{ ...card, marginTop: 6 }}>
-          {/* BAR-9: the bar itself, above the words rather than after them, and
-              the one place the growth animation runs. It replays on every visit
-              because every visit is a fresh mount, and someone on this screen
-              tapped through to find out how the bar moves, so they are looking
-              at it. Two placements have now failed for the same reason and both
-              had to be looked at to be found: on the home screen the growth
-              fired two frames after mount, which on a phone is spent behind the
-              PWA's splash-to-app transition, and at the foot of this card it sat
-              under four paragraphs and below this screen's own fold. It ran
-              correctly both times and was seen neither. Same lesson as CMP-8's
-              inert companion. No `onExplain`, since this is where it leads. */}
+          {/* BAR-9: the bar itself above the words, rather than the sentence
+              that used to summarise it below them, so the figure and the bar it
+              explains come from one render instead of two and cannot disagree.
+              No `onExplain`, since this is the screen that link leads to. */}
           <div style={{ marginBottom: 15 }}>
             <HealthBar capacity={capacity} budget={budget} blind={blind} isSunday={false}
-              pausedTomorrow={pausedTomorrow} restored={restored} animate />
+              pausedTomorrow={pausedTomorrow} restored={restored} />
           </div>
           <p style={{ margin: 0, fontSize: 14.5, lineHeight: 1.6, color: palette.ink }}>
             <strong>How capacity works.</strong> You have {budget} units of room. Logging a drink spends it. Each morning at 05:00, {regen.toFixed(1)} units come back, up to a full {budget}.
