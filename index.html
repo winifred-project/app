@@ -2,7 +2,7 @@
 <html lang="en-GB">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <meta name="theme-color" content="#10191d" />
     <link rel="icon" href="/app/favicon-32.png" sizes="32x32" />
     <link rel="icon" href="/app/icon.svg" type="image/svg+xml" />
@@ -13,16 +13,35 @@
     <meta name="mobile-web-app-capable" content="yes" />
     <title>Winifred</title>
     <style>
-      html { background: #10191d; -webkit-text-size-adjust: 100%; }
+      /* NFR-10: the app is a fixed-scale surface. The viewport meta above
+         removes pinch and the JS in main.jsx closes the WebKit gesture
+         loophole; touch-action here is what removes double-tap zoom, and
+         `manipulation` is chosen over `none` deliberately so panning and
+         scrolling are untouched. text-size-adjust stays at 100% so the
+         system text size is still honoured, which is the accessibility
+         route that replaces pinch. */
+      html {
+        background: #10191d;
+        -webkit-text-size-adjust: 100%;
+        text-size-adjust: 100%;
+        touch-action: manipulation;
+      }
       body {
         margin: 0;
         background: #10191d;
         min-height: 100dvh;
         overscroll-behavior-y: none;
         -webkit-tap-highlight-color: transparent;
+        touch-action: manipulation;
       }
       #root { min-height: 100dvh; }
       button, input, textarea, select { font: inherit; }
+      /* iOS zooms the whole page in when a control under 16px takes focus,
+         which is the jarring one, since it happens on an ordinary tap and
+         the page stays zoomed afterwards. 16px is the threshold, so this is
+         a floor rather than a size: any control that sets its own larger
+         size still wins. */
+      input, textarea, select { font-size: max(16px, 1em); }
 
       /* ---------------------------------------------------------------
          CMP-6 / CMP-7 companion motion.

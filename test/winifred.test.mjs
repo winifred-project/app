@@ -818,6 +818,45 @@ group("TIM-7 timezone handling must not surface as configuration");
   ok("no prompt asking the user to confirm a day", !/which day|confirm.{0,20}day/i.test(prose));
 }
 
+group("NFR-10 the app is a fixed-scale surface");
+{
+  const html = fs.readFileSync(path.join(here, "..", "index.html"), "utf8");
+  const lock = fs.readFileSync(path.join(here, "..", "src", "viewportlock.js"), "utf8");
+  const main = fs.readFileSync(path.join(here, "..", "src", "main.jsx"), "utf8");
+  const viewport = (html.match(/name="viewport"\s+content="([^"]*)"/) || [])[1] || "";
+
+  ok("the viewport forbids user scaling", /user-scalable=no/.test(viewport));
+  ok("and pins the scale at 1 in both directions", /maximum-scale=1/.test(viewport) && /minimum-scale=1/.test(viewport));
+  ok("the safe-area opt-in survives it", /viewport-fit=cover/.test(viewport));
+  ok("double-tap zoom is off", /touch-action:\s*manipulation/.test(html));
+  // `none` would take panning and scrolling with it, which is not the ask.
+  ok("without taking scrolling with it", !/touch-action:\s*none/.test(html));
+
+  // WebKit has ignored user-scalable=no for pinch since iOS 10, so the meta tag
+  // on its own leaves the app zoomable on the device it is built for.
+  ok("the WebKit pinch loophole is closed", /gesturestart/.test(lock) && /gesturechange/.test(lock));
+  ok("with cancellable listeners", /passive:\s*false/.test(lock));
+  ok("and it runs before the first paint", main.indexOf("lockViewportScale()") < main.indexOf("createRoot"));
+  ok("only multi-touch is cancelled", /touches\.length > 1/.test(lock));
+
+  // The focus zoom is the one the user actually hit: it fires on an ordinary tap
+  // into a field and the page stays zoomed afterwards. 16px is iOS's threshold.
+  const controls = src.split("\n").map((l, i) => [i + 1, l])
+    .filter(([, l]) => /fontSize:\s*(?:[0-9]|1[0-5])(?:\.[0-9]+)?\s*[,}]/.test(l))
+    .filter(([, l]) => /<input|<textarea|<select|const field =/.test(l));
+  ok(`no form control sits under 16px (${controls.length} flagged)`, controls.length === 0);
+  controls.forEach(([n, l]) => console.log(`        line ${n}: ${l.trim().slice(0, 100)}`));
+  ok("and a floor catches any that set no size", /input,\s*textarea,\s*select\s*{\s*font-size:\s*max\(16px/.test(html));
+
+  // NFR-4: removing pinch removes a route to larger text, so the other one has
+  // to stay open. text-size-adjust at 100% is what keeps the system size honoured.
+  ok("NFR-4: the system text size is still honoured", /-webkit-text-size-adjust:\s*100%/.test(html) && /[^-]text-size-adjust:\s*100%/.test(html));
+  // Comments stripped: the module explains in prose why ctrl+wheel is left alone,
+  // and that sentence must not read as the code doing it.
+  const lockCode = lock.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+  ok("and desktop browser zoom is left alone", !/ctrlKey/.test(lockCode) && !/wheel/.test(lockCode));
+}
+
 // =====================================================================
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail) { console.log("\nfailures:"); fails.forEach((f) => console.log(`  - ${f}`)); }
