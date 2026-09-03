@@ -136,9 +136,6 @@ const defaultState = {
   maxDaySeen: null,
   // TIM-6: the season's first day, so its length is never re-derived.
   seasonStartDay: null,
-  // BAR-9: the day whose refill has already been animated, so a reload at 10:25
-  // does not replay a boundary the user has already watched arrive.
-  lastRefillShownDay: null,
   ai: { tier: null, cloudConsent: false, modelDownloaded: false },
 };
 
@@ -1116,34 +1113,15 @@ export default function Winifred() {
     // eslint-disable-next-line
     [state && state.logs, state && state.budget, todayK]
   );
-  // BAR-9: what landed at this morning's boundary, and whether this open is the
-  // first since it did. `restoredToday` is read from the same walk as `capacity`,
-  // so the figure in the copy and the width of the bar cannot disagree.
+  // BAR-9: what landed at this morning's boundary. Read from the same walk as
+  // `capacity`, so the figure in the copy and the width of the bar cannot
+  // disagree. The home screen never animates it: the growth lives on the
+  // explainer screen instead, for the reason recorded in BAR-9.
   const restoredToday = useMemo(
     () => (state ? refillToday(state.logs, state.budget, now, maxDaySeen) : 0),
     // eslint-disable-next-line
     [state && state.logs, state && state.budget, todayK]
   );
-  const animateRefill = !!state && restoredToday > 0.05 && state.lastRefillShownDay !== todayK;
-  // Read through a ref rather than closing over `state`, so a drink logged during
-  // the animation is not clobbered by this write a second later.
-  const stateRef = useRef(state);
-  stateRef.current = state;
-  useEffect(() => {
-    if (!animateRefill) return;
-    // Marked as shown after the growth has run, not before it, so the write
-    // cannot cut short the thing it is recording. Persisted (DAT-1) because a
-    // reload at 10:25 must not replay a boundary already watched arriving.
-    const id = setTimeout(() => {
-      const s = stateRef.current;
-      if (!s || s.lastRefillShownDay === todayK) return;
-      const next = { ...s, lastRefillShownDay: todayK };
-      setState(next);
-      saveState(next);
-    }, 1500);
-    return () => clearTimeout(id);
-    // eslint-disable-next-line
-  }, [animateRefill, todayK]);
 
   if (!state) {
     return <div style={{ minHeight: "100dvh", background: palette.bg, color: palette.inkDim, display: "grid", placeItems: "center", fontFamily: "ui-rounded, 'SF Pro Rounded', 'Nunito', system-ui, sans-serif" }}>Lighting the lamp…</div>;
@@ -1372,6 +1350,8 @@ export default function Winifred() {
         logs={state.logs}
         budget={state.budget}
         capacity={capacity}
+        restored={restoredToday}
+        pausedTomorrow={pausedTomorrow}
         show={state.show}
         blind={mutator.blind && !isSunday}
         now={now}
@@ -1576,7 +1556,7 @@ export default function Winifred() {
             directly above the two actions that change it. Three stacked text
             rows became one ledger line plus a chip row (MET-4, MUT-1). */}
         <div style={{ ...card, marginTop: 12, padding: 15 }}>
-          <HealthBar capacity={capacity} budget={state.budget} blind={mutator.blind} isSunday={isSunday} onExplain={() => setScreen("log")} pausedTomorrow={pausedTomorrow} restored={restoredToday} animate={animateRefill} />
+          <HealthBar capacity={capacity} budget={state.budget} blind={mutator.blind} isSunday={isSunday} onExplain={() => setScreen("log")} pausedTomorrow={pausedTomorrow} restored={restoredToday} />
           <div style={{ fontSize: 13, color: palette.inkDim, marginTop: 9, lineHeight: 1.45 }}>
             {[
               state.show.kcal ? (mutator.blind && !isSunday ? "kcal hidden until Sunday" : `~${kcalFrom(usedUnits)} kcal from alcohol, last 7 days`) : null,
@@ -2059,7 +2039,7 @@ function QuestSuggester({ tier, cloudConsent, profile, onProfile, deck, onAddQue
 // are collapsed into one line each so the restoring days are legible rather than
 // a wall of empty rows.
 // =====================================================================
-function LogScreen({ shell, card, logs, budget, capacity, show, blind, now, todayKey, onRemove, onBack }) {
+function LogScreen({ shell, card, logs, budget, capacity, restored, pausedTomorrow, show, blind, now, todayKey, onRemove, onBack }) {
   const today = todayKey;
   const regen = regenPerDay(budget);
 
@@ -2101,8 +2081,6 @@ function LogScreen({ shell, card, logs, budget, capacity, show, blind, now, toda
     // eslint-disable-next-line
   }, [logs, budget, today]);
 
-  const backTomorrow = Math.min(regen, budget - capacity);
-
   return (
     <div style={shell}>
       <div style={{ maxWidth: 560, margin: "0 auto" }}>
@@ -2113,6 +2091,21 @@ function LogScreen({ shell, card, logs, budget, capacity, show, blind, now, toda
         </p>
 
         <div style={{ ...card, marginTop: 6 }}>
+          {/* BAR-9: the bar itself, above the words rather than after them, and
+              the one place the growth animation runs. It replays on every visit
+              because every visit is a fresh mount, and someone on this screen
+              tapped through to find out how the bar moves, so they are looking
+              at it. Two placements have now failed for the same reason and both
+              had to be looked at to be found: on the home screen the growth
+              fired two frames after mount, which on a phone is spent behind the
+              PWA's splash-to-app transition, and at the foot of this card it sat
+              under four paragraphs and below this screen's own fold. It ran
+              correctly both times and was seen neither. Same lesson as CMP-8's
+              inert companion. No `onExplain`, since this is where it leads. */}
+          <div style={{ marginBottom: 15 }}>
+            <HealthBar capacity={capacity} budget={budget} blind={blind} isSunday={false}
+              pausedTomorrow={pausedTomorrow} restored={restored} animate />
+          </div>
           <p style={{ margin: 0, fontSize: 14.5, lineHeight: 1.6, color: palette.ink }}>
             <strong>How capacity works.</strong> You have {budget} units of room. Logging a drink spends it. Each morning at 05:00, {regen.toFixed(1)} units come back, up to a full {budget}.
           </p>
@@ -2125,12 +2118,6 @@ function LogScreen({ shell, card, logs, budget, capacity, show, blind, now, toda
           <p style={{ margin: "10px 0 0", fontSize: 13, lineHeight: 1.6, color: palette.inkDim }}>
             These are ways of keeping score, chosen from the weekly guideline and divided by seven. They are not a statement about what your body is doing.
           </p>
-          {!blind && (
-            <p style={{ margin: "12px 0 0", fontSize: 14, color: palette.bar }}>
-              Right now: {capacity < 0 ? `${(-capacity).toFixed(1)} units over` : `${capacity.toFixed(1)} of ${budget} in hand`}
-              {backTomorrow > 0.05 ? ` · +${backTomorrow.toFixed(1)} at 05:00` : " · full"}
-            </p>
-          )}
         </div>
 
         {!logs.length && (
