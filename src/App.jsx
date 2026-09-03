@@ -136,6 +136,9 @@ const defaultState = {
   maxDaySeen: null,
   // TIM-6: the season's first day, so its length is never re-derived.
   seasonStartDay: null,
+  // BAR-9: the day whose refill has already been animated, so a reload at 10:25
+  // does not replay a boundary the user has already watched arrive.
+  lastRefillShownDay: null,
   ai: { tier: null, cloudConsent: false, modelDownloaded: false },
 };
 
@@ -248,6 +251,20 @@ function capacityAt(logs, budget, now, maxSeen) {
 function refillPausedTomorrow(logs, budget, now, maxSeen) {
   const today = (unitsByDay(logs).get(effectiveDayKey(now, maxSeen)) || 0);
   return today >= concentrationThreshold(budget);
+}
+
+// BAR-9: how much capacity landed at this morning's boundary. Read from the same
+// walk the bar reads (capacityTimeline) rather than recomputed, because a figure
+// the bar contradicts is worse than no figure at all. Zero on the first day ever
+// logged (the pool started full), on a forfeited morning (BAR-7) and when the bar
+// was already at the cap, all of which are "nothing came back" rather than a gap.
+function refillToday(logs, budget, now, maxSeen) {
+  const tl = capacityTimeline(logs, budget, now, maxSeen);
+  if (!tl.length) return 0;
+  const last = tl[tl.length - 1];
+  // The walk stops at today, so the last entry is today's unless every log is
+  // future-dated, in which case nothing has been restored yet either.
+  return last.key === effectiveDayKey(now, maxSeen) ? last.refill : 0;
 }
 // ---- end of pure day maths ----
 // The test harness slices everything between `function logDay` and this line and
@@ -806,7 +823,7 @@ function Companion({ mood, size = 180 }) {
 // a calendar boundary. BAR-6: the copy stays behavioural. Regeneration at budget/7
 // is a game abstraction chosen so that a steady 2 units a day breaks even; it is not
 // a claim about how a body recovers, and nothing here may imply one.
-function HealthBar({ capacity, budget, blind, isSunday, onExplain, pausedTomorrow }) {
+function HealthBar({ capacity, budget, blind, isSunday, onExplain, pausedTomorrow, restored = 0, animate = false }) {
   const pct = Math.max(0, Math.min(1, capacity / budget));
   const over = capacity < 0 ? -capacity : 0;
   const color = pct > 0.5 ? palette.bar : pct > 0.15 ? palette.barLow : palette.barGone;
@@ -815,13 +832,64 @@ function HealthBar({ capacity, budget, blind, isSunday, onExplain, pausedTomorro
   const backTomorrow = Math.min(regen, budget - capacity);
   // Debt is floored at one budget (BAR-5), so |capacity|/budget fills the bar.
   const debtPct = Math.max(0, Math.min(1, -capacity / budget));
+
+  // BAR-9: a refill lands at an hour nobody is awake for, into the same pool the
+  // drinking drains, so by morning one number carries both and says neither. The
+  // figure is named in the copy whenever it is known, including in debt, because
+  // a tint cannot carry a number (NFR-4). The band and the growth need somewhere
+  // to grow from, which debt has not got: a receding hatch cannot show a gain
+  // arriving from the left, so below zero the copy carries it alone.
+  const shown = !hidden && restored > 0.05;
+  const landed = shown && capacity > 0;
+  // Expressed as a fraction of the fill rather than of the track, so it scales
+  // with the fill during the growth instead of floating past its edge. Clamped
+  // at 1: a morning that restored more than is now left means the rest was drunk
+  // after it landed, and all of what remains did come back, so a full band is
+  // the honest drawing.
+  const slice = landed ? Math.max(0, Math.min(1, restored / capacity)) : 0;
+
+  // NFR-9: the growth is a transform, so an otherwise idle screen pays no layout
+  // for it. Reduced motion skips it outright and loses nothing, since the band,
+  // the hairline and the copy carry the same fact without it.
+  const reduced = usePrefersReducedMotion();
+  const play = landed && animate && !reduced;
+  const [grow, setGrow] = useState(play);
+  useEffect(() => {
+    if (!play) { setGrow(false); return; }
+    setGrow(true);
+    // Two frames, not one: React commits the mount and runs this effect inside
+    // the same paint, so a single frame would flip the transform before the
+    // pre-refill width had ever been drawn and there would be nothing to watch.
+    let a = 0, b = 0;
+    a = requestAnimationFrame(() => { b = requestAnimationFrame(() => setGrow(false)); });
+    return () => { cancelAnimationFrame(a); cancelAnimationFrame(b); };
+  }, [play]);
+
+  // BAR-6/TIM-5: 05:00 is the hour that actually applies on all 365 days, and
+  // naming the day as well is the point. "+2.0 back at 05:00" on its own read as
+  // plausibly past as future at 10:25, which is the defect BAR-9 exists to fix.
+  // What came back rides in the header row rather than the caption row, which is
+  // a fold decision and not a stylistic one. Measured at 390px: the caption row
+  // has 211px beside "How this works", and every phrasing carrying both figures
+  // wrapped to a second line and cost 15px, which MET-5 has not got. The header
+  // row has 190px beside the widest capacity figure and this needs 174, so the
+  // two facts sit one above the other for free. Past tense in the header, future
+  // in the caption: "back today" against "back at 05:00 tomorrow".
+  const cameBack = shown ? ` \u00b7 +${restored.toFixed(1)} back today` : "";
+  // BAR-7: the forfeited morning is stated as the arithmetic it is, in the dim
+  // ink, and says why. It is not a reprimand and must not be styled as one (P1).
+  // BAR-9: naming the day is the fix for the original defect, where "+2.0 back at
+  // 05:00" at 10:25 read as plausibly past as future.
+  const note = pausedTomorrow
+    ? "Three days' worth today: none back tomorrow"
+    : backTomorrow > 0.05 ? `+${backTomorrow.toFixed(1)} back at 05:00 tomorrow` : "Full. Nothing to restore.";
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: palette.inkDim, marginBottom: 6 }}>
-        <span>Capacity</span>
+        <span>Capacity{cameBack}</span>
         <span>{hidden ? "Hidden until Sunday" : over > 0 ? `${over.toFixed(1)} units over` : `${capacity.toFixed(1)} of ${budget} units left`}</span>
       </div>
-      <div role="progressbar" aria-valuenow={hidden ? undefined : Math.round(pct * 100)} aria-valuemin={0} aria-valuemax={100} aria-label="Remaining unit capacity" style={{ height: 18, borderRadius: 10, background: "#0b1215", border: `1px solid ${palette.line}`, overflow: "hidden", position: "relative" }}>
+      <div role="progressbar" aria-valuenow={hidden ? undefined : Math.round(pct * 100)} aria-valuemin={0} aria-valuemax={100} aria-label={`Remaining unit capacity${shown ? `, ${restored.toFixed(1)} units restored at 05:00 today` : ""}`} style={{ height: 18, borderRadius: 10, background: "#0b1215", border: `1px solid ${palette.line}`, overflow: "hidden", position: "relative" }}>
         {hidden ? (
           <div style={{ position: "absolute", inset: 0, background: "repeating-linear-gradient(45deg, #16262c, #16262c 8px, #1e2c33 8px, #1e2c33 16px)", display: "grid", placeItems: "center", fontSize: 11, color: palette.inkDim, letterSpacing: 1 }}>blind week</div>
         ) : capacity < 0 ? (
@@ -829,16 +897,33 @@ function HealthBar({ capacity, budget, blind, isSunday, onExplain, pausedTomorro
           // shown as a dim fill rather than a warning. Muted on purpose (P1).
           <div style={{ width: `${debtPct * 100}%`, height: "100%", background: `repeating-linear-gradient(45deg, ${palette.barGone}66, ${palette.barGone}66 6px, ${palette.barGone}33 6px, ${palette.barGone}33 12px)`, borderRadius: 9, transition: "width 500ms ease" }} />
         ) : (
-          <div style={{ width: `${pct * 100}%`, height: "100%", background: `linear-gradient(90deg, ${color}, ${color}cc)`, borderRadius: 9, transition: "width 500ms ease" }} />
+          <div style={{
+            width: `${pct * 100}%`, height: "100%", background: `linear-gradient(90deg, ${color}, ${color}cc)`,
+            borderRadius: 9, position: "relative", overflow: "hidden",
+            // BAR-9: the growth runs on the transform and the drink-logging
+            // shrink still runs on the width, which is a pre-existing debt
+            // rather than a new one; the two never fire in the same frame.
+            transformOrigin: "left center",
+            transform: grow ? `scaleX(${Math.max(0, 1 - slice)})` : "scaleX(1)",
+            transition: "width 500ms ease, transform 900ms cubic-bezier(.22,.72,.2,1)",
+          }}>
+            {slice > 0 && (
+              <>
+                {/* BAR-9: where the bar would be standing without this morning's
+                    refill. It stays all day rather than only during the growth,
+                    because the user who opens the app at 10:25 has already
+                    missed the arrival and still needs to see what arrived. */}
+                <div style={{ position: "absolute", top: 0, bottom: 0, left: `${(1 - slice) * 100}%`, right: 0, background: "#ffffff1f", pointerEvents: "none" }} />
+                <div style={{ position: "absolute", top: 0, bottom: 0, left: `${(1 - slice) * 100}%`, width: 1.5, background: "#ffffff70", pointerEvents: "none" }} />
+              </>
+            )}
+          </div>
         )}
       </div>
       {!hidden && (
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginTop: 7, fontSize: 12.5, color: palette.inkDim }}>
-          {/* BAR-7: state the forfeited refill plainly and without colour. It is
-              arithmetic the user can check in the log, not a reprimand (P1). */}
-          <span>{pausedTomorrow
-            ? "Three days' worth today: none back tomorrow"
-            : backTomorrow > 0.05 ? `+${backTomorrow.toFixed(1)} back at 05:00` : "Full. Nothing to restore."}</span>
+          {/* BAR-9: what came back and what is due next, in one line. */}
+          <span>{note}</span>
           {onExplain && (
             <button onClick={onExplain} style={{ background: "none", border: "none", color: palette.bar, fontSize: 12.5, fontFamily: "inherit", cursor: "pointer", textDecoration: "underline", textUnderlineOffset: 3, whiteSpace: "nowrap", flexShrink: 0,
               // NFR-4: padded to a thumb-sized hit box, then pulled back by the
@@ -1031,6 +1116,34 @@ export default function Winifred() {
     // eslint-disable-next-line
     [state && state.logs, state && state.budget, todayK]
   );
+  // BAR-9: what landed at this morning's boundary, and whether this open is the
+  // first since it did. `restoredToday` is read from the same walk as `capacity`,
+  // so the figure in the copy and the width of the bar cannot disagree.
+  const restoredToday = useMemo(
+    () => (state ? refillToday(state.logs, state.budget, now, maxDaySeen) : 0),
+    // eslint-disable-next-line
+    [state && state.logs, state && state.budget, todayK]
+  );
+  const animateRefill = !!state && restoredToday > 0.05 && state.lastRefillShownDay !== todayK;
+  // Read through a ref rather than closing over `state`, so a drink logged during
+  // the animation is not clobbered by this write a second later.
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  useEffect(() => {
+    if (!animateRefill) return;
+    // Marked as shown after the growth has run, not before it, so the write
+    // cannot cut short the thing it is recording. Persisted (DAT-1) because a
+    // reload at 10:25 must not replay a boundary already watched arriving.
+    const id = setTimeout(() => {
+      const s = stateRef.current;
+      if (!s || s.lastRefillShownDay === todayK) return;
+      const next = { ...s, lastRefillShownDay: todayK };
+      setState(next);
+      saveState(next);
+    }, 1500);
+    return () => clearTimeout(id);
+    // eslint-disable-next-line
+  }, [animateRefill, todayK]);
 
   if (!state) {
     return <div style={{ minHeight: "100dvh", background: palette.bg, color: palette.inkDim, display: "grid", placeItems: "center", fontFamily: "ui-rounded, 'SF Pro Rounded', 'Nunito', system-ui, sans-serif" }}>Lighting the lamp…</div>;
@@ -1463,7 +1576,7 @@ export default function Winifred() {
             directly above the two actions that change it. Three stacked text
             rows became one ledger line plus a chip row (MET-4, MUT-1). */}
         <div style={{ ...card, marginTop: 12, padding: 15 }}>
-          <HealthBar capacity={capacity} budget={state.budget} blind={mutator.blind} isSunday={isSunday} onExplain={() => setScreen("log")} pausedTomorrow={pausedTomorrow} />
+          <HealthBar capacity={capacity} budget={state.budget} blind={mutator.blind} isSunday={isSunday} onExplain={() => setScreen("log")} pausedTomorrow={pausedTomorrow} restored={restoredToday} animate={animateRefill} />
           <div style={{ fontSize: 13, color: palette.inkDim, marginTop: 9, lineHeight: 1.45 }}>
             {[
               state.show.kcal ? (mutator.blind && !isSunday ? "kcal hidden until Sunday" : `~${kcalFrom(usedUnits)} kcal from alcohol, last 7 days`) : null,

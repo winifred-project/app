@@ -46,9 +46,9 @@ const inject = {
   dayKeyIn, weekStartIn, nextDayKey, daysBetweenKeys, boundaryOfKey, weekdayOfKey,
   activeZone: () => zone,
 };
-const { logDay, effectiveDayKey, dayLabel, unitsByDay, capacityAt, capacityTimeline, regenPerDay, concentrationThreshold, refillPausedTomorrow } =
+const { logDay, effectiveDayKey, dayLabel, unitsByDay, capacityAt, capacityTimeline, regenPerDay, concentrationThreshold, refillPausedTomorrow, refillToday } =
   new Function(...Object.keys(inject),
-    `${helpers}\nreturn { logDay, effectiveDayKey, dayLabel, unitsByDay, capacityAt, capacityTimeline, regenPerDay, concentrationThreshold, refillPausedTomorrow };`
+    `${helpers}\nreturn { logDay, effectiveDayKey, dayLabel, unitsByDay, capacityAt, capacityTimeline, regenPerDay, concentrationThreshold, refillPausedTomorrow, refillToday };`
   )(...Object.values(inject));
 
 // The boundary is no longer computed in App.jsx at all, so these bind the
@@ -162,6 +162,61 @@ ok("spread days never pause", !refillPausedTomorrow([L(0, 2)], B, at(0, 23)));
   eq("day 2, forfeited again", capacityAt(two, B, at(2, 23)), -2);
   eq("day 3, refill resumes", capacityAt(two, B, at(3, 23)), 0);
 }
+group("BAR-9 the refill is a figure the bar can be checked against");
+eq("no logs, nothing was restored", refillToday([], B, at(0)), 0);
+{
+  const one = [L(0, 4)];
+  eq("the first day ever logged restored nothing", refillToday(one, B, at(0, 23)), 0);
+  eq("the next morning restored a day's worth", refillToday(one, B, at(1, 23)), 2);
+  // The defect BAR-9 exists to fix was a figure with nothing to check it
+  // against, so assert the figure IS the movement rather than merely near it.
+  eq("and that figure is exactly the movement the bar made",
+    capacityAt(one, B, at(1, 23)) - capacityAt(one, B, at(0, 23)), refillToday(one, B, at(1, 23)));
+  eq("a capped bar restored nothing", refillToday(one, B, at(4, 23)), 0);
+}
+{
+  // A partial refill: only one unit of headroom was missing, so only one is back
+  // and the copy must not promise the full two.
+  const nearly = [L(0, 1)];
+  eq("a partial refill reports what fitted, not the rate", refillToday(nearly, B, at(1, 23)), 1);
+}
+{
+  // BAR-7: a forfeited morning restored nothing, and must read as nothing rather
+  // than as a gap in the figure.
+  const heavy = [L(0, 6)];
+  eq("the morning after a concentrated day", refillToday(heavy, B, at(1, 23)), 0);
+  eq("the morning after that", refillToday(heavy, B, at(2, 23)), 2);
+}
+{
+  // BAR-5/BAR-9: a refill lands while capacity is negative too. The band cannot
+  // be drawn there, which is why the copy has to carry the figure.
+  const sliding = Array.from({ length: 6 }, (_, i) => L(i, 5));
+  ok("six days of five units leaves debt", capacityAt(sliding, B, at(6, 23)) < 0);
+  eq("and a refill still landed this morning", refillToday(sliding, B, at(6, 23)), 2);
+}
+ok("never reports more than the daily rate",
+  [0, 1, 2, 3, 7, 14, 30].every((d) => refillToday([L(0, 4), L(3, 9)], B, at(d, 23)) <= regenPerDay(B)));
+
+group("BAR-9 the refill is observable, not merely correct");
+ok("the bar is handed what was restored", src.includes("restored={restoredToday}"));
+ok("and whether this open is the first since it landed", src.includes("animate={animateRefill}"));
+ok("the figure comes from the same walk as the bar", src.includes("refillToday(state.logs, state.budget, now, maxDaySeen)"));
+ok("the once-a-day flag is persisted, so a reload cannot replay it",
+  /lastRefillShownDay: null/.test(src) && src.includes("lastRefillShownDay: todayK"));
+ok("NFR-9: the growth is a transform, not a width", /transform: grow \?/.test(src) && /scaleX\(/.test(src));
+ok("NFR-9: reduced motion skips it", src.includes("landed && animate && !reduced"));
+ok("NFR-4: the restored figure is in words, not only in a tint", src.includes("back today`"));
+ok("and in the accessible name", src.includes("units restored at 05:00 today"));
+ok("MET-5: it rides in the header row, which has the spare width", src.includes("<span>Capacity{cameBack}</span>"));
+{
+  // The original defect, as a regression guard: an hour with no day attached read
+  // as plausibly past as future at 10:25 on the morning after.
+  const bare = src.split("\n").map((l, i) => [i + 1, l])
+    .filter(([, l]) => /back at 05:00(?! tomorrow)/.test(l) && !/BAR-9|read as/.test(l));
+  ok(`no copy names 05:00 without saying which one (${bare.length} lines flagged)`, bare.length === 0);
+  bare.forEach(([n, l]) => console.log(`        line ${n}: ${l.trim().slice(0, 100)}`));
+}
+
 group("BAR-7 the log's figures must match the bar");
 {
   const logs = [L(0, 8), L(4, 3)];
