@@ -199,10 +199,24 @@ ok("never reports more than the daily rate",
 
 group("BAR-9 the refill is observable, not merely correct");
 ok("the bar is handed what was restored", src.includes("restored={restoredToday}"));
-ok("and whether this open is the first since it landed", src.includes("animate={animateRefill}"));
 ok("the figure comes from the same walk as the bar", src.includes("refillToday(state.logs, state.budget, now, maxDaySeen)"));
-ok("the once-a-day flag is persisted, so a reload cannot replay it",
-  /lastRefillShownDay: null/.test(src) && src.includes("lastRefillShownDay: todayK"));
+{
+  // The growth belongs on the explainer screen, not on mount. On the home screen
+  // it fired two frames after mount, which on a phone is spent behind the PWA's
+  // splash-to-app transition: it ran, recorded itself as shown, and was never
+  // seen. Assert the arrangement rather than the intent, since the intent was
+  // what was wrong.
+  const home = src.slice(src.indexOf("<HealthBar capacity={capacity} budget={state.budget}"));
+  const homeTag = home.slice(0, home.indexOf("/>"));
+  ok("the home screen bar does not animate", !/animate/.test(homeTag));
+  ok("and still carries the band and the figure", /restored={restoredToday}/.test(homeTag));
+  const exp = src.slice(src.indexOf("<HealthBar capacity={capacity} budget={budget}"));
+  const expTag = exp.slice(0, exp.indexOf("/>"));
+  ok("the explainer screen bar does animate", /\banimate\b/.test(expTag));
+  ok("and needs no once-a-day flag, because every visit is a fresh mount",
+    !/lastRefillShownDay/.test(src));
+  ok("the explainer offers no link back to itself", !/onExplain/.test(expTag));
+}
 ok("NFR-9: the growth is a transform, not a width", /transform: grow \?/.test(src) && /scaleX\(/.test(src));
 ok("NFR-9: reduced motion skips it", src.includes("landed && animate && !reduced"));
 ok("NFR-4: the restored figure is in words, not only in a tint", src.includes("back today`"));
