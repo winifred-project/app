@@ -1027,6 +1027,30 @@ export default function Winifred() {
 
   useEffect(() => onUpdateReady(() => setUpdateReady(true)), []);
 
+  // ----- scroll position across screens -----
+  // A screen change here is React state and not navigation, so the document
+  // keeps the offset of the screen being left: tapping Recap from the world
+  // map, which sits near the foot of the home screen, opened the recap already
+  // scrolled past its own heading and back button. Every screen change
+  // therefore starts at the top. The one exception is the way back to home,
+  // which is restored to where it was left, so the card the user tapped from
+  // is still under their thumb rather than a screen away; without that, the
+  // fix for one jarring move introduces another. Reported from a phone, which
+  // is the only place the home screen is long enough for it to show.
+  const homeScroll = useRef(0);
+  const lastScreen = useRef(screen);
+  useEffect(() => {
+    const from = lastScreen.current;
+    lastScreen.current = screen;
+    if (from === screen) return;
+    if (from === "home") homeScroll.current = window.scrollY;
+    const top = screen === "home" ? homeScroll.current : 0;
+    // After the new screen has been laid out, so the document is tall enough
+    // for the restore to land where it was rather than being clamped short.
+    const frame = requestAnimationFrame(() => window.scrollTo(0, top));
+    return () => cancelAnimationFrame(frame);
+  }, [screen]);
+
   async function runUpdateCheck() {
     setCheckingUpdate(true);
     const result = await checkForUpdate();

@@ -857,6 +857,26 @@ group("NFR-10 the app is a fixed-scale surface");
   ok("and desktop browser zoom is left alone", !/ctrlKey/.test(lockCode) && !/wheel/.test(lockCode));
 }
 
+group("screen changes start at the top");
+{
+  // A screen change is state and not navigation, so nothing resets the document
+  // scroll on its own: the recap opened at the offset the home screen was left
+  // at, which on a phone is far enough down to hide its own back button.
+  const effect = slice('  const homeScroll = useRef(0);', '  }, [screen]);');
+
+  ok("the reset is keyed on the screen", /\}, \[screen\]\);/.test(src) && effect.length > 0);
+  ok("a repeat render of the same screen leaves the offset alone", /if \(from === screen\) return;/.test(effect));
+  ok("home's offset is remembered on the way out", /if \(from === "home"\) homeScroll\.current = window\.scrollY;/.test(effect));
+  ok("the way back to home restores it", /screen === "home" \? homeScroll\.current : 0/.test(effect));
+  // Before layout the new screen has no height yet and a restore lands clamped
+  // short, which reads as a second jump rather than as no jump at all.
+  ok("and the move waits for layout", /requestAnimationFrame\(\(\) => window\.scrollTo\(/.test(effect));
+  ok("with the frame cancelled on unmount", /cancelAnimationFrame\(frame\)/.test(effect));
+  // NFR-9: a smooth scroll here would be motion the user did not ask for on
+  // every single screen change, and the reduced-motion route does not cover it.
+  ok("NFR-9: the move is instant, not animated", !/behavior:\s*"smooth"/.test(effect));
+}
+
 // =====================================================================
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail) { console.log("\nfailures:"); fails.forEach((f) => console.log(`  - ${f}`)); }
