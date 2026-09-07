@@ -877,6 +877,81 @@ group("screen changes start at the top");
   ok("NFR-9: the move is instant, not animated", !/behavior:\s*"smooth"/.test(effect));
 }
 
+group("DAT-6 the export can be sent, not only saved");
+{
+  const shareFn = slice("  async function shareData() {", "\n  }\n");
+  // The prose in here explains why text must not ride along with the file, so
+  // the assertions below would find their own comment if it stayed.
+  const shareCode = shareFn.replace(/\/\/.*$/gm, "");
+
+  ok("the file is offered to the share sheet", /navigator\.share\(/.test(shareCode));
+  // navigator.share exists on browsers that will not take a file, so testing
+  // for the method rather than for the capability is how a dead button ships.
+  ok("capability is tested with the file, not for the method",
+    /navigator\.canShare && navigator\.canShare\(\{ files: \[file\] \}\)/.test(shareCode));
+  ok("a machine with no sheet gets the download instead",
+    /\)\) \{ downloadExport\(\); return; \}/.test(shareCode));
+  // A share called after an await has lost the tap's user activation, which is
+  // a rejection on iOS and a silent no-op elsewhere.
+  ok("nothing is awaited before the share is asked for",
+    shareCode.indexOf("await") === shareCode.indexOf("await navigator.share"));
+  ok("no title or text rides along with the file",
+    !/navigator\.share\(\{[^)]*(title|text):/.test(shareCode));
+  {
+    // P1: a cancelled sheet is a decision. Writing the file anyway would be the
+    // app overriding it, and saying "sent" would be worse.
+    const caught = shareCode.slice(shareCode.lastIndexOf("} catch"));
+    ok("a cancelled sheet is recognised", /AbortError/.test(caught));
+    ok("and writes nothing behind the user", caught.indexOf("return;") < caught.indexOf("downloadExport"));
+  }
+  ok("the filename carries the day, so a folder of backups can be read",
+    /return `winifred-\$\{todayK\}\.json`/.test(src));
+  ok("the fixed filename is gone", !src.includes("winifred-export.json"));
+  ok("Settings sends rather than downloads", src.includes("onClick={shareData}") && !src.includes("exportData"));
+  // The whole state is more than the user pictures when they think "my data",
+  // and a share sheet is one tap from the wrong person.
+  ok("the control says what is in the file",
+    /notes to future self/.test(src) && /Keep it somewhere only you can reach/.test(src));
+}
+
+group("DAT-7 a file arriving from outside is asked about, not applied");
+{
+  ok("one validator serves both routes in", src.includes("function readExport(") &&
+    (src.match(/readExport\(/g) || []).length >= 3);
+  ok("TIM-2's migration still runs on an import",
+    /function applyImport\([\s\S]{0,600}migrateState\(parsed\)/.test(src));
+
+  const consumer = slice("    importerRef.current = (text) => {", "    };");
+  ok("an opened file waits for an answer", /setPendingImport\(parsed\)/.test(consumer));
+  ok("and is not applied on arrival", !/applyImport/.test(consumer));
+  ok("a file that is not an export is refused the same way",
+    /That doesn't look like a Winifred export/.test(consumer));
+
+  // DAT-3 keeps its wholesale restore: arriving at the picker is the asking.
+  const picker = slice("                  const reader = new FileReader();", "                  reader.readAsText(file);");
+  ok("the picker still restores wholesale (DAT-3)", /applyImport\(parsed\)/.test(picker));
+
+  ok("the confirmation sits ahead of every other route",
+    src.indexOf("if (pendingImport) {") < src.indexOf('if (screen === "setup")'));
+  const confirm = slice("  if (pendingImport) {", "\n  // ----- setup -----");
+  ok("it names what is in the file", /The file holds/.test(confirm));
+  ok("and what is on the device", /This device holds/.test(confirm));
+  ok("P1: keeping what is here is an equal option, not a get-out",
+    /Keep what is on this device/.test(confirm));
+  ok("P2: it says nothing merges and there is no undo",
+    /Nothing merges, and there is no undo/.test(confirm));
+  ok("the restore is the only thing that writes", (confirm.match(/applyImport\(/g) || []).length === 1);
+
+  const cfg = fs.readFileSync(path.join(here, "..", "vite.config.js"), "utf8");
+  ok("the app registers as a handler for the export's type",
+    /file_handlers:\s*\[/.test(cfg) && /"application\/json": \[".json"\]/.test(cfg));
+  ok("the handler stays inside the app's scope", /\{ action: BASE, accept:/.test(cfg));
+  // The app is a single held state; a second copy of it is not where an
+  // opened file belongs.
+  ok("an opened file goes to the window already running",
+    /launch_handler:\s*\{ client_mode: "focus-existing" \}/.test(cfg));
+}
+
 // =====================================================================
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail) { console.log("\nfailures:"); fails.forEach((f) => console.log(`  - ${f}`)); }

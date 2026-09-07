@@ -996,6 +996,9 @@ export default function Winifred() {
   const [updateSnoozed, setUpdateSnoozed] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [whatsNew, setWhatsNew] = useState(null);
+  // DAT-7: a file opened from outside the app waits here until the user has
+  // answered for it. Nothing is written to storage while it does.
+  const [pendingImport, setPendingImport] = useState(null);
   const now = useNow(1000);
   const toastTimer = useRef(null);
 
@@ -1144,6 +1147,32 @@ export default function Winifred() {
     [state && state.logs, state && state.budget, todayK]
   );
 
+  // DAT-7: an export that arrives on the device as a file can be opened
+  // straight into the app rather than found again through the picker. The
+  // consumer is registered once, so it holds the first render's closure; the
+  // ref is what keeps it reading the current state instead.
+  const importerRef = useRef(null);
+  useEffect(() => {
+    importerRef.current = (text) => {
+      const parsed = readExport(text);
+      if (!parsed) { say("That doesn't look like a Winifred export."); return; }
+      setPendingImport(parsed);
+    };
+  });
+  useEffect(() => {
+    const queue = typeof window !== "undefined" ? window.launchQueue : null;
+    if (!queue || typeof queue.setConsumer !== "function") return;
+    queue.setConsumer(async (params) => {
+      const handles = (params && params.files) || [];
+      if (!handles.length) return;
+      try {
+        const file = await handles[0].getFile();
+        const text = await file.text();
+        if (importerRef.current) importerRef.current(text);
+      } catch (e) { say("Couldn't read that file. Is it the exported JSON?"); }
+    });
+  }, []);
+
   if (!state) {
     return <div style={{ minHeight: "100dvh", background: palette.bg, color: palette.inkDim, display: "grid", placeItems: "center", fontFamily: "ui-rounded, 'SF Pro Rounded', 'Nunito', system-ui, sans-serif" }}>Lighting the lamp…</div>;
   }
@@ -1241,15 +1270,73 @@ export default function Winifred() {
     setScreen("home");
     say(`Season banked. Permanent rank ${state.prestige + 1}. The map refogs; the rank never fades.`);
   }
-  function exportData() {
+  // DAT-6: the file is the same export DAT-2 has always produced; what changes
+  // is where it can go. A download is how a desktop moves a file and a poor way
+  // for a phone to: on iOS it lands in Files and has to be found again, which
+  // is a folder picker and three steps between two devices sitting next to each
+  // other. navigator.share hands the identical file to the OS sheet, where
+  // AirDrop, Messages and any drive the user has already trusted live. Nothing
+  // new leaves the device on its own: the sheet is the user choosing a
+  // destination by hand, which is a stronger consent than the silent write to
+  // Downloads it replaces (P3).
+  function exportName() {
+    // Dated, because a folder of files called winifred-export(3).json tells the
+    // user nothing about which one is the one they want back.
+    return `winifred-${todayK}.json`;
+  }
+  function exportText() { return JSON.stringify(state, null, 2); }
+  function downloadExport() {
     try {
-      const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
+      const blob = new Blob([exportText()], { type: "application/json" });
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
-      a.download = "winifred-export.json";
+      a.download = exportName();
       a.click();
-      say("Data exported as JSON. Keep it somewhere safe.");
+      URL.revokeObjectURL(a.href);
+      say("Saved as a file. Keep it somewhere only you can reach.");
     } catch (e) { say("Export failed in this environment."); }
+  }
+  async function shareData() {
+    let file = null;
+    try {
+      file = new File([exportText()], exportName(), { type: "application/json" });
+    } catch (e) { downloadExport(); return; }
+    // canShare({ files }) is the only honest test of this: several browsers
+    // expose navigator.share without accepting a file through it, and Firefox
+    // on the desktop has no sheet at all. Failing that test is not an error,
+    // it is a machine where a download is the right answer.
+    if (!(navigator.canShare && navigator.canShare({ files: [file] }))) { downloadExport(); return; }
+    try {
+      // Files alone, no title or text: some share targets drop the attachment
+      // when text rides along with it, and the file is the entire point. Called
+      // before any await, so the tap's user activation still stands.
+      await navigator.share({ files: [file] });
+      say("Sent. That file is your whole history, so keep it somewhere only you can reach.");
+    } catch (e) {
+      // A cancelled sheet is a decision, not a failure. Writing the file to
+      // disk anyway would be the app overriding it (P1), so this returns.
+      if (e && e.name === "AbortError") { say("Sharing cancelled. Nothing left the device."); return; }
+      downloadExport();
+    }
+  }
+
+  // DAT-3 and DAT-7 in one place: a file arriving through the picker and the
+  // same file arriving from outside the app must be validated identically, or
+  // the route in decides how strict the check is.
+  function readExport(text) {
+    let parsed = null;
+    try { parsed = JSON.parse(text); } catch (e) { return null; }
+    if (!parsed || !Array.isArray(parsed.logs) || typeof parsed.budget !== "number") return null;
+    return parsed;
+  }
+  function applyImport(parsed) {
+    // The same migration the loader runs (TIM-2): an import is the sanctioned
+    // path for device transfer and origin change (DAT-3), so it cannot be the
+    // path that skips it.
+    const restored = { ...migrateState(parsed), onboarded: true, lastOpen: nowMs() };
+    setState(restored);
+    saveState(restored);
+    say(`Imported: ${restored.logs.length} drinks, ${restored.cravingsWon.length} cravings beaten, season intact. Welcome home.`);
   }
 
   // ----- companion reply routing with safety layers -----
@@ -1286,6 +1373,47 @@ export default function Winifred() {
     paddingLeft: "calc(16px + env(safe-area-inset-left, 0px))",
   };
   const card = { background: palette.panel, border: `1px solid ${palette.line}`, borderRadius: 18, padding: 18 };
+
+  // ----- a file opened from outside the app (DAT-7) -----
+  // Ahead of every other route: a restore replaces the lot, and a screen the
+  // user has to leave deliberately is the only place that decision is safe to
+  // put. Tapping a file in a folder is not the same as asking for this, so the
+  // app asks, names what is on both sides, and writes nothing until answered.
+  if (pendingImport) {
+    const incoming = Array.isArray(pendingImport.logs) ? pendingImport.logs : [];
+    const incomingCravings = Array.isArray(pendingImport.cravingsWon) ? pendingImport.cravingsWon.length : 0;
+    const lastEntry = incoming.length ? incoming[incoming.length - 1] : null;
+    const lastDay = lastEntry ? dayLabel(logDay(lastEntry), todayK) : null;
+    return (
+      <div style={shell}>
+        <div style={{ width: "100%", maxWidth: 420 }}>
+          <h2 style={{ fontSize: 22, fontWeight: 800 }}>Restore from this file?</h2>
+          <div style={card}>
+            <p style={{ fontSize: 14.5, lineHeight: 1.55, marginTop: 0 }}>
+              <strong>The file holds</strong> {incoming.length} drink{incoming.length === 1 ? "" : "s"}, {incomingCravings} craving{incomingCravings === 1 ? "" : "s"} beaten, and a budget of {pendingImport.budget} units{lastDay ? `, ending ${/^(Today|Yesterday)$/.test(lastDay) ? lastDay.toLowerCase() : lastDay}` : ""}.
+            </p>
+            <p style={{ fontSize: 14.5, lineHeight: 1.55, color: palette.inkDim }}>
+              <strong style={{ color: palette.ink }}>This device holds</strong> {state.logs.length} drink{state.logs.length === 1 ? "" : "s"}, {state.cravingsWon.length} craving{state.cravingsWon.length === 1 ? "" : "s"} beaten, and permanent rank {state.prestige}.
+            </p>
+            <p style={{ fontSize: 12.5, lineHeight: 1.5, color: palette.inkDim }}>
+              Restoring puts the file in place of what is here. Nothing merges, and there is no undo, so send yourself a copy of this device first if you want to keep both.
+            </p>
+          </div>
+          <div style={{ marginTop: 16 }}>
+            <BigButton tone="warm" onClick={() => { const parsed = pendingImport; setPendingImport(null); applyImport(parsed); setScreen("home"); }}>Restore from the file</BigButton>
+          </div>
+          <div style={{ marginTop: 10 }}>
+            <BigButton tone="ghost" onClick={() => { setPendingImport(null); say("Left as it was. Nothing changed."); }}>Keep what is on this device</BigButton>
+          </div>
+        </div>
+        {toast && (
+          <div style={{ position: "fixed", left: "50%", bottom: "calc(24px + env(safe-area-inset-bottom, 0px))", transform: "translateX(-50%)", background: "#0b1215", border: `1px solid ${palette.line}`, color: palette.ink, padding: "10px 16px", borderRadius: 12, fontSize: 14, maxWidth: 360, textAlign: "center", boxShadow: "0 6px 24px rgba(0,0,0,0.4)", zIndex: 50 }}>
+            {toast}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   // ----- setup -----
   if (screen === "setup") {
@@ -1436,7 +1564,10 @@ export default function Winifred() {
               <BigButton tone="ghost" onClick={() => setScreen("recap")}>Preview season recap</BigButton>
             </div>
             <div style={{ marginTop: 10 }}>
-              <BigButton tone="ghost" onClick={exportData}>Export my data (JSON)</BigButton>
+              <BigButton tone="ghost" onClick={shareData}>Send or save my data (JSON)</BigButton>
+              <p style={{ fontSize: 12.5, color: palette.inkDim, lineHeight: 1.5, marginTop: 8 }}>
+                Opens the share sheet, so AirDrop, Messages or a drive can carry it to another device; where there is no sheet it saves the file instead. The file is your whole history: every drink, your notes to future self, and what you have told {state.companionName} about you. Keep it somewhere only you can reach.
+              </p>
             </div>
             <div style={{ marginTop: 10 }}>
               <BigButton tone="ghost" onClick={() => document.getElementById("lo-import-file") && document.getElementById("lo-import-file").click()}>Import data (JSON)</BigButton>
@@ -1452,18 +1583,15 @@ export default function Winifred() {
                   const reader = new FileReader();
                   reader.onload = () => {
                     try {
-                      const parsed = JSON.parse(reader.result);
-                      if (!parsed || !Array.isArray(parsed.logs) || typeof parsed.budget !== "number") {
+                      const parsed = readExport(reader.result);
+                      if (!parsed) {
                         say("That doesn't look like a Winifred export.");
                         return;
                       }
-                      // The same migration the loader runs (TIM-2): an import is
-                      // the sanctioned path for device transfer and origin change
-                      // (DAT-3), so it cannot be the path that skips it.
-                      const restored = { ...migrateState(parsed), onboarded: true, lastOpen: nowMs() };
-                      setState(restored);
-                      saveState(restored);
-                      say(`Imported: ${restored.logs.length} drinks, ${restored.cravingsWon.length} cravings beaten, season intact. Welcome home.`);
+                      // DAT-3 keeps its wholesale restore: the user came here by
+                      // tapping Import, which is the asking. DAT-7's confirmation
+                      // is for the file that arrives without that tap.
+                      applyImport(parsed);
                     } catch (err) {
                       say("Couldn't read that file. Is it the exported JSON?");
                     }
