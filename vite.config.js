@@ -71,6 +71,21 @@ export default defineConfig({
           { src: "icon-512.png", sizes: "512x512", type: "image/png" },
           { src: "icon-512-maskable.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
         ],
+        // DAT-7: the other half of DAT-6. Once a phone can send the export to
+        // another device, that device has a file sitting in a folder, and
+        // "open it with Winifred" is a shorter path back in than finding it
+        // again through the picker. JSON is the only type the export has, so
+        // the app registers for JSON generally and refuses anything that fails
+        // DAT-3's shape check, with DAT-7's confirmation in front of it.
+        // Chromium only, and only once installed: iOS supports neither this nor
+        // a share target, which is why DAT-3's picker remains the way in there
+        // and why the sending half of this pair is the half that matters.
+        file_handlers: [
+          { action: BASE, accept: { "application/json": [".json"] } },
+        ],
+        // The app is a single held state, so an opened file goes to the window
+        // already running rather than to a second copy of it.
+        launch_handler: { client_mode: "focus-existing" },
       },
       workbox: {
         // Precache the whole shell: the app must run with no network at
