@@ -216,6 +216,107 @@ export function clampDaySeen(stored, rawToday) {
   return !stored || rawToday > stored ? rawToday : stored;
 }
 
+// ---- the drink catalogue (DRK-11, DAT-8) --------------------------------
+//
+// A log entry used to carry the whole drink: label, ml, abv, units and cost
+// repeated verbatim on every line, 115 bytes an entry where 49 would do. Two
+// things follow from fixing that, and only one of them is about size.
+//
+// The size part is arithmetic. At twenty drinks a week a fat log is 118 KiB a
+// year and 1.15 MiB at ten years, and every `update()` writes the whole store
+// synchronously on the main thread (App.jsx `saveState`), on the same tap P2
+// gives a three-second budget. Slim entries cut that by 55%.
+//
+// The part that matters more is that the obvious fix is wrong. Pointing a log
+// entry at `state.drinks` would be a TIM-1 defect wearing different clothes:
+// that array is edited by the user through the drink editor, so correcting an
+// ABV, changing a price, reordering the deck or deleting a button would rewrite
+// every night already lived. TIM-1 settled this for the day a drink belongs to
+// ("the timestamp records when the drink happened; the day records which night
+// it was") and what was in the glass is the same class of fact.
+//
+// So the catalogue is derived from the logs themselves and never from the deck.
+// Packing collects each entry's own frozen drink facts, dedupes them by value in
+// first-appearance order, and replaces them with an index; unpacking puts them
+// back. Nothing the user can edit is reachable from it, so history is not merely
+// preserved by rule, it is structurally unrewritable. The catalogue exists only
+// on disk and in the export: the state the app holds always carries fat entries,
+// so no read site in the app has to know any of this happened, and none of the
+// capacity, dry-day or spend arithmetic changed to accommodate it.
+export const LOG_META = ["t", "day", "tzo"];
+
+// Everything on an entry that is not one of the three time fields is a drink
+// fact, rather than a fixed list of five, so a field added later (or `seed`,
+// which rides along on a log made from a seeded button) round-trips instead of
+// being silently dropped. Keys are sorted so two entries that differ only in
+// key order still dedupe to one catalogue row.
+function drinkFactsOf(l) {
+  const out = {};
+  for (const k of Object.keys(l).sort()) if (!LOG_META.includes(k) && k !== "c") out[k] = l[k];
+  return out;
+}
+
+// Runs unconditionally and is idempotent, like every other step in the
+// migration. It is deliberately not gated on `stateVersion`: v1.14 recorded a
+// migration that was, and that never ran, because the defaults merge spreads a
+// `defaultState` already declaring the current version. Shape is the only
+// honest test, so an entry with a numeric `c` is slim and anything else is fat.
+export function packState(input) {
+  if (!input || !Array.isArray(input.logs)) return input;
+  // Hydrate first, then pack. That makes packing idempotent, keeps the indices
+  // canonical however the state arrived, and drops any catalogue row the last
+  // log referencing it was removed from (DRK-10). Packing a packed state by
+  // walking it as-is was the first version and it rebuilt the catalogue from the
+  // fat entries it no longer had, emptying it while leaving every index in place.
+  const s = unpackState(input);
+  const cat = [];
+  const seen = new Map();
+  const logs = s.logs.map((l) => {
+    if (!l || typeof l !== "object") return l;
+    const facts = drinkFactsOf(l);
+    const key = JSON.stringify(facts);
+    let i = seen.get(key);
+    if (i === undefined) { i = cat.length; seen.set(key, i); cat.push(facts); }
+    const slim = { c: i };
+    for (const k of LOG_META) if (k in l) slim[k] = l[k];
+    return slim;
+  });
+  return { ...s, logs, drinkCat: cat };
+}
+
+// The reverse. An index that does not resolve keeps its entry rather than
+// dropping it, because losing a night is worse than showing an incomplete one,
+// and the entry is labelled as what it is rather than quietly counted as zero of
+// something. We never write such a file ourselves; `catalogueResolves` below is
+// what stops one arriving through DAT-3.
+export function unpackState(s) {
+  if (!s || !Array.isArray(s.logs)) return s;
+  const cat = Array.isArray(s.drinkCat) ? s.drinkCat : null;
+  const logs = s.logs.map((l) => {
+    if (!l || typeof l !== "object" || typeof l.c !== "number") return l;
+    const facts = cat && cat[l.c] && typeof cat[l.c] === "object" ? cat[l.c] : null;
+    const meta = {};
+    for (const k of LOG_META) if (k in l) meta[k] = l[k];
+    return facts
+      ? { ...facts, ...meta }
+      : { label: "Unrecorded drink", ml: 0, abv: 0, units: 0, cost: 0, ...meta };
+  });
+  const out = { ...s, logs };
+  // The catalogue is a storage format, not state. Held in memory it would go
+  // stale the moment a log is removed, and two sources for one fact is the
+  // disagreement MET-4 exists to prevent.
+  delete out.drinkCat;
+  return out;
+}
+
+// DAT-3's shape check: a slim entry whose index has nothing behind it means the
+// file is damaged, and the picker is the place to say so rather than the loader.
+export function catalogueResolves(s) {
+  if (!s || !Array.isArray(s.logs)) return false;
+  const cat = Array.isArray(s.drinkCat) ? s.drinkCat : [];
+  return s.logs.every((l) => !l || typeof l.c !== "number" || (l.c >= 0 && l.c < cat.length && !!cat[l.c]));
+}
+
 // ---- the override itself ------------------------------------------------
 
 function systemZone() {
@@ -265,7 +366,9 @@ export function onDevClock(fn) { listeners.add(fn); return () => listeners.delet
 
 // TIM-2 advances the key, because the migration derives a field per log entry
 // and cannot be expressed as a defaults merge. DAT-1's merge still runs on top.
-export const STATE_VERSION = 2;
+// v3 packs the log against a derived drink catalogue (DRK-11, DAT-8). Nothing
+// reads the number to decide whether to migrate; it records what has run.
+export const STATE_VERSION = 3;
 export const REAL_KEY = "winifred-state-v2";
 export const LEGACY_KEYS = ["winifred-state-v1", "lastorders-state-v3"];
 export const SANDBOX_KEY = "winifred-state-sandbox";
