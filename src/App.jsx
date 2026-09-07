@@ -8,6 +8,7 @@ import {
   dayKeyIn, weekStartIn, offsetMsAt, freezeLogDays,
   nextDayKey, boundaryOfKey, weekdayOfKey, weekStartKeyIn, entryTime,
   storeKey, isSandbox, LEGACY_KEYS, STATE_VERSION, backfillState, clampDaySeen,
+  daysBetweenKeys, packState, unpackState, catalogueResolves,
 } from "./devclock.js";
 
 // Winifred v3: adds the AI setup wizard and trust layer.
@@ -49,6 +50,11 @@ const palette = {
   inkDim: "#9fb0ae", bar: "#5fd1b5", barLow: "#c9a15a", barGone: "#8a5a4a",
   glow: "#ffd98a", accent: "#e8b45c", line: "#2a3a41",
 };
+
+// Positive remainder. The mutator rotation is indexed from a fixed Monday
+// (MUTATOR_EPOCH_KEY) so a week before that epoch counts negative, and `%` in
+// JavaScript keeps the sign, which would index off the front of the array.
+function mod(n, m) { return ((n % m) + m) % m; }
 
 // UK units = ml x ABV% / 1000
 function unitsFrom(ml, abv) { return Math.round((ml * abv) / 100) / 10; }
@@ -156,7 +162,17 @@ function effectiveDayKey(now, maxSeen) {
   return maxSeen && maxSeen > raw ? maxSeen : raw;
 }
 // Mutators still rotate on calendar weeks (MUT-1); the health bar no longer does.
-function weekIndex(now) { return Math.floor(weekStart(now) / (7 * DAY)); }
+// Counted by stepping day keys from a fixed Monday rather than by dividing an
+// absolute millisecond count by seven days, which is TIM-6's rule applied to the
+// one window MUT-1 deliberately keeps on the calendar. The old arithmetic
+// happens to give the same answer for every week from 2024 to 2030, verified in
+// the harness, because a clock change moves Monday 05:00 by an hour and no such
+// hour lands on a multiple of seven days in that era. That is luck rather than a
+// property, and the phase is preserved exactly: the epoch below is chosen so
+// every week keeps the mutator it already had.
+const MUTATOR_EPOCH_KEY = "2026-08-31";
+function weekIndex(now) { return weekIndexOfKey(weekStartKeyIn(now, activeZone())); }
+function weekIndexOfKey(weekStartKey) { return Math.floor(daysBetweenKeys(MUTATOR_EPOCH_KEY, weekStartKey) / 7); }
 
 // BAR-4: the day boundary sits at 05:00 local, so a 1am drink belongs to the
 // night before. The boundary itself now lives in devclock.js (dayStartTrue,
@@ -222,7 +238,16 @@ function capacityTimeline(logs, budget, now, maxSeen) {
   // and would have broken had the walk run past today.
   if (cur > today) cur = today;
   let level = cap, first = true, prevConcentrated = false, guard = 0;
-  while (cur <= today && guard++ < 4000) {
+  // The guard is there to stop a malformed day key spinning this loop forever,
+  // so it has to be a bound on *this* history rather than a constant. It was
+  // 4000, which is ten years and eleven months: on the 4001st day after a first
+  // log the walk stopped short of today and `capacityAt` returned a capacity
+  // from 2036, silently and with the bar simply frozen. A limit derived from the
+  // span keeps the protection and cannot truncate a history that legitimately
+  // reaches it. The walk is O(days since the first log) and is memoised on log,
+  // budget and day change rather than run per render.
+  const limit = Math.max(1, daysBetweenKeys(cur, today) + 1) + 1;
+  while (cur <= today && guard++ < limit) {
     const paused = !first && prevConcentrated;
     const refill = first || paused ? 0 : Math.max(0, Math.min(regen, cap - level));
     level = Math.min(cap, level + refill);
@@ -263,6 +288,107 @@ function refillToday(logs, budget, now, maxSeen) {
   // future-dated, in which case nothing has been restored yet either.
   return last.key === effectiveDayKey(now, maxSeen) ? last.refill : 0;
 }
+// SSN-1 / TIM-6: which season days have closed dry, by day key.
+//
+// Pulled out of the component because the version inside it was driven off
+// `seasonDayNum`, which TIM-6 deliberately keeps on elapsed duration from the
+// season's start timestamp so that SSN-3's day 28 cannot be reached early by
+// flying east. Using that same number to decide how many days to *enumerate*
+// conflated two different questions and was an off-by-one for any season that
+// began after 05:00: measured on a season started at 13:16, the duration read 5
+// while six day keys had passed, so the walk stopped a day short and yesterday's
+// dry day went uncredited until the following evening. The length of the season
+// stays a duration; the days inside it are counted as days.
+//
+// Today is excluded deliberately. A day with nothing logged in it yet is an
+// unfinished day, not a dry one, and crediting it would take the credit back the
+// moment a drink was logged - a reversal of visible progress that P1 forbids.
+function seasonDryDayKeys(seasonStartKey, todayKey, loggedDays, seasonLength = 28) {
+  const closed = Math.max(0, Math.min(seasonLength, daysBetweenKeys(seasonStartKey, todayKey)));
+  const out = [];
+  for (let i = 0; i < closed; i++) {
+    const k = nextDayKey(seasonStartKey, i);
+    if (!loggedDays.has(k)) out.push(k);
+  }
+  return out;
+}
+
+// BAR-10: a second channel on the bar, measured against the user instead of
+// against the budget.
+//
+// The capacity pool answers one question, "how much room is left against the
+// number you set", and for a user near that number it answers it well. Measured
+// on a real week at 3.11x the budget it answers nothing at all: capacity sat at
+// the debt floor of -14.0, and repeating that week leaves the bar between -14.0
+// and -12.0 for ever, two units of travel on a 28-unit instrument. Halving that
+// week's intake, which in real life is a substantial change, still reads between
+// -14.0 and -10.3 sixteen weeks later. The companion saturates the same way: its
+// mood ratio is 3.11 against a "rough" threshold of 1.5, so nothing brightens
+// until the intake is more than halved. Both of the app's feedback channels are
+// pinned at their worst reading and neither can show an improvement, which is P4
+// failing in the one place it is supposed to hold, since a forgiving structure
+// only forgives if the forgiveness is legible (BAR-9).
+//
+// So this compares the trailing seven days against the median of the preceding
+// four seven-day windows. The median rather than the mean because one holiday
+// week should not become the standard the next month is judged against, and four
+// windows because that is a month of context without reaching back to a person
+// the user no longer is. It needs two complete windows before it will say
+// anything: with fewer, the honest output is nothing, and the explainer (DRK-10)
+// carries the wait rather than the home screen inventing a figure.
+//
+// Nothing here asserts anything about a body, so BAR-6 is not engaged, and there
+// is deliberately no colour and no target: it reports a direction and a figure
+// against the user's own recent past, which is the one comparison a person at
+// three times their budget can actually move.
+const BASELINE_WINDOWS = 4;
+const BASELINE_MIN_WINDOWS = 2;
+// A window is seven day keys ending on `endKey` inclusive, which is the same
+// window MET-4 requires every unit-derived figure to share, stepped rather than
+// offset so a clock change cannot lengthen or shorten it (TIM-6).
+function unitsInWindow(perDay, endKey) {
+  let sum = 0;
+  for (let i = 0; i < 7; i++) sum += perDay.get(nextDayKey(endKey, -i)) || 0;
+  return sum;
+}
+// A prior window counts only when the whole of it sits inside recorded history.
+// A window reaching back before the first log would read as an abstinent week
+// the user never had, which would make every real week look worse than it is:
+// exactly the shape of dishonesty P2 exists to prevent, and it would land on the
+// side that discourages.
+function baselineAt(logs, now, maxSeen) {
+  if (!logs.length) return null;
+  const today = effectiveDayKey(now, maxSeen);
+  const perDay = unitsByDay(logs);
+  const firstKey = [...perDay.keys()].sort()[0];
+  const current = unitsInWindow(perDay, today);
+  const priors = [];
+  for (let i = 1; i <= BASELINE_WINDOWS; i++) {
+    if (nextDayKey(today, -7 * i - 6) < firstKey) break;
+    priors.push(unitsInWindow(perDay, nextDayKey(today, -7 * i)));
+  }
+  if (priors.length < BASELINE_MIN_WINDOWS) {
+    const have = daysBetweenKeys(firstKey, today);
+    return { current, baseline: null, windows: priors.length, needDays: Math.max(0, 7 * BASELINE_MIN_WINDOWS + 6 - have) };
+  }
+  const sorted = [...priors].sort((a, b) => a - b);
+  const mid = sorted.length >> 1;
+  const baseline = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  return { current, baseline, windows: priors.length, needDays: 0 };
+}
+// BAR-10 copy. Returns null when there is nothing true to say, and the bar then
+// keeps its plain label rather than showing a placeholder: an empty channel is
+// better than a channel that has to be discounted. "Usual" is deliberately the
+// user's own recent past and not a target, a guideline or a claim about a body
+// (BAR-6), and the half-unit deadband stops it flickering between over and under
+// on a rounding difference.
+function baselineNote(b) {
+  if (!b || b.baseline === null) return null;
+  const d = b.current - b.baseline;
+  if (Math.abs(d) < 0.5) return "Level with your usual";
+  return `${Math.abs(d).toFixed(1)} ${d < 0 ? "under" : "over"} your usual`;
+}
+
 // ---- end of pure day maths ----
 // The test harness slices everything between `function logDay` and this line and
 // evaluates it, so the tests exercise the shipped arithmetic rather than a copy
@@ -348,14 +474,36 @@ const MUTATORS = [
   { name: "Blind Week", desc: "The health bar is hidden until Sunday. Play by feel.", dryXP: 10, cravingXP: 25, lateCravingXP: 25, questBonus: 0, blind: true },
   { name: "Quartermaster", desc: "Every quest completed this week earns +15 bonus XP.", dryXP: 10, cravingXP: 25, lateCravingXP: 25, questBonus: 15, blind: false },
 ];
-function mutatorFor(now) { return MUTATORS[weekIndex(now) % MUTATORS.length]; }
+function mutatorFor(now) { return MUTATORS[mod(weekIndex(now), MUTATORS.length)]; }
+// SSN-7: which rule was in force on a given day, for scoring what was earned
+// then rather than what this week happens to be worth. Takes either a frozen day
+// key (TIM-1) or an absolute timestamp, because dry days are identified by key
+// and beaten cravings by the moment they were beaten.
+function mutatorAtKey(key) { return MUTATORS[mod(weekIndexOfKey(weekStartKeyIn(boundaryOfKey(key, activeZone()), activeZone())), MUTATORS.length)]; }
+function mutatorAt(when) { return typeof when === "string" ? mutatorAtKey(when) : mutatorFor(when); }
 
-// SSN-1 / SSN-2: season scoring, kept pure and at module scope so the harness
-// can exercise the shipped maths rather than re-implementing it (R-5).
-function seasonXP({ dryDays, cravings, bonus, mutator }) {
-  const fromCravings = cravings.reduce(
-    (a, c) => a + (c.late && mutator.lateCravingXP > mutator.cravingXP ? mutator.lateCravingXP : mutator.cravingXP), 0);
-  return dryDays * mutator.dryXP + fromCravings + bonus;
+// SSN-1 / SSN-2 / SSN-7: season scoring, kept pure and at module scope so the
+// harness can exercise the shipped maths rather than re-implementing it (R-5).
+// The resolver is injected rather than reached for, which is what keeps this
+// function evaluable on its own in the harness slice.
+//
+// SSN-7: XP is earned under the mutator in force at the time, never under this
+// week's. It used to take one mutator and apply it to the whole season, so the
+// Monday rotation rewrote everything already earned: measured on real data, one
+// dry day banked under Steady Flame (20 XP, one region clear) became 10 XP and
+// no regions at 05:00 the following Monday, and a region vanished off the map
+// with nothing logged and nothing done. SSN-6 guards the copy that claims the
+// fog moved; it cannot guard the fog moving backwards on its own. A visible
+// reversal of progress the user earned is what P1 and P4 forbid most plainly,
+// and it is the same defect TIM-1 records as losing a region for boarding a
+// plane, arrived at from the other direction.
+function seasonXP({ dryDayKeys = [], cravings = [], bonus = 0, mutatorAt }) {
+  const fromDry = dryDayKeys.reduce((a, k) => a + mutatorAt(k).dryXP, 0);
+  const fromCravings = cravings.reduce((a, c) => {
+    const m = mutatorAt(c.t);
+    return a + (c.late && m.lateCravingXP > m.cravingXP ? m.lateCravingXP : m.cravingXP);
+  }, 0);
+  return fromDry + fromCravings + bonus;
 }
 function regionsFrom(xp) { return Math.min(28, Math.floor(xp / XP_PER_REGION)); }
 
@@ -374,7 +522,12 @@ function useNow(intervalMs) {
 // and importing an export (DAT-3). Putting it only in the loader was the
 // original plan and would have left every imported history unmigrated, which is
 // precisely the path DAT-3 sanctions for device transfer.
-function migrateState(parsed) {
+function migrateState(input) {
+  // DRK-11: hydrate the packed log before anything else touches it, so every
+  // step after this point sees the fat entries the whole app is written against
+  // and the catalogue never survives into held state. Idempotent on a fat store,
+  // and not gated on `stateVersion` for the reason recorded below.
+  const parsed = unpackState(input);
   const s = {
     ...JSON.parse(JSON.stringify(defaultState)), ...parsed,
     ai: { ...defaultState.ai, ...(parsed.ai || {}) },
@@ -415,7 +568,11 @@ async function loadState() {
   }
   return withDaySeen(JSON.parse(JSON.stringify(defaultState)));
 }
-async function saveState(s) { try { localStorage.setItem(storeKey(), JSON.stringify(s)); } catch (e) { /* session only */ } }
+// DRK-11: the log is packed on the way out. This is the one write path in the
+// app and it runs on every `update()`, synchronously on the main thread, which
+// is the tap P2 gives three seconds; packing makes the string it stringifies
+// roughly 55% shorter per drink logged.
+async function saveState(s) { try { localStorage.setItem(storeKey(), JSON.stringify(packState(s))); } catch (e) { /* session only */ } }
 
 function skyFor(now) {
   const h = hourIn(now, activeZone());
@@ -820,7 +977,7 @@ function Companion({ mood, size = 180 }) {
 // a calendar boundary. BAR-6: the copy stays behavioural. Regeneration at budget/7
 // is a game abstraction chosen so that a steady 2 units a day breaks even; it is not
 // a claim about how a body recovers, and nothing here may imply one.
-function HealthBar({ capacity, budget, blind, isSunday, onExplain, pausedTomorrow, restored = 0 }) {
+function HealthBar({ capacity, budget, blind, isSunday, onExplain, pausedTomorrow, restored = 0, baseline = null }) {
   const pct = Math.max(0, Math.min(1, capacity / budget));
   const over = capacity < 0 ? -capacity : 0;
   const color = pct > 0.5 ? palette.bar : pct > 0.15 ? palette.barLow : palette.barGone;
@@ -872,18 +1029,69 @@ function HealthBar({ capacity, budget, blind, isSunday, onExplain, pausedTomorro
   // row has 190px beside the widest capacity figure and this needs 174, so the
   // two facts sit one above the other for free. Past tense in the header, future
   // in the caption: "back today" against "back at 05:00 tomorrow".
-  const cameBack = shown ? ` \u00b7 +${restored.toFixed(1)} back today` : "";
+  // BAR-10 / BAR-9a: one rule for each of the two rows, rather than a placement
+  // that depends on the day. The header's left slot carries the slow channel:
+  // the trend against the user's own recent past, or the plain label before
+  // there is one. The caption's left slot carries the day's refill news, which
+  // is what landed this morning, what is due next, or that tomorrow is forfeit.
+  // Both figures BAR-9 requires are still in words on the home screen and
+  // neither row gains height.
+  //
+  // This amends BAR-9's arrangement and it was settled by measuring, not by
+  // preferring it. BAR-9 put the restored figure in the header because that row
+  // had 190px spare beside the capacity figure and the phrasing needed 174. The
+  // trend needs that width too and the two together do not fit: driven at
+  // 390x664 the slot rendered "25.0 under your usual - +2.0 back today" at
+  // 238px, wrapped, cost 15px, and pushed the lowest drink button 15px further
+  // down, which is MET-5's whole point and the fourth time in this project that
+  // a requirement passed on reasoning and failed on a phone-sized screen.
+  // Terser wordings do not rescue it: the two facts need about 213px between
+  // them at their shortest and the slot has 190. So the restored figure moves
+  // down a row to sit with the rest of the day's refill news, which keeps
+  // BAR-9's substance (a figure in words, dated, no colour, no reprimand) and
+  // gives up only its choice of row. Every state was then re-driven: the header
+  // reads 126-143px and the caption 130-207px, all on one line, and the fold
+  // sits exactly where the shipped build left it.
+  //
+  // Where there is no baseline yet the plain label comes back, so the channel
+  // appears when it has something true to say and never as a placeholder.
+  // Hidden under Blind Week with every other unit-derived figure (BAR-3).
+  const trend = hidden ? null : baselineNote(baseline);
   // BAR-7: the forfeited morning is stated as the arithmetic it is, in the dim
   // ink, and says why. It is not a reprimand and must not be styled as one (P1).
   // BAR-9: naming the day is the fix for the original defect, where "+2.0 back at
   // 05:00" at 10:25 read as plausibly past as future.
+  // BAR-9: what landed and what is due next, both in this row, both naming the
+  // day they belong to. Every branch is measured against the 211px this slot
+  // actually has beside "How this works", which is the figure BAR-9 recorded and
+  // which the browser confirms; the widest refill any budget can produce is
+  // `budget / 7` at the 30-unit maximum, so the figures are never wider than
+  // "+4.3" and the two-figure forms land at 206px.
+  //
+  // BAR-7's forfeit line is shortened here and that is a defect fixed rather
+  // than a preference. "Three days' worth today: none back tomorrow" measures
+  // 288px in a 211px slot, so it has been wrapping to a second line and costing
+  // MET-5 15px on every day a user logs three days' worth: the state the fold
+  // budget can least afford, on the day it is most likely to be over. Nothing
+  // noticed because nothing measured the copy and the arithmetic behind it was
+  // right. The reason for the forfeit stays in the explainer (DRK-10), where
+  // BAR-8's "three days' worth" wording belongs and has room; the bar states the
+  // consequence only, without colour and without reprimand (P1).
+  //
+  // The combined forms name the day and drop the hour, which is a smaller claim
+  // than BAR-9's original wording and not the defect it was written against:
+  // that defect was an hour with no day, which read as plausibly past as future
+  // at 10:25. The hour survives in the single-figure branch the user sees on
+  // most days, and in the explainer.
   const note = pausedTomorrow
-    ? "Three days' worth today: none back tomorrow"
+    ? (shown ? `+${restored.toFixed(1)} back today, none tomorrow` : "None back tomorrow")
+    : shown && backTomorrow > 0.05 ? `+${restored.toFixed(1)} back today, +${backTomorrow.toFixed(1)} tomorrow`
+    : shown ? `+${restored.toFixed(1)} back today. Full.`
     : backTomorrow > 0.05 ? `+${backTomorrow.toFixed(1)} back at 05:00 tomorrow` : "Full. Nothing to restore.";
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: palette.inkDim, marginBottom: 6 }}>
-        <span>Capacity{cameBack}</span>
+        <span>{trend || "Capacity"}</span>
         <span>{hidden ? "Hidden until Sunday" : over > 0 ? `${over.toFixed(1)} units over` : `${capacity.toFixed(1)} of ${budget} units left`}</span>
       </div>
       <div role="progressbar" aria-valuenow={hidden ? undefined : Math.round(pct * 100)} aria-valuemin={0} aria-valuemax={100} aria-label={`Remaining unit capacity${shown ? `, ${restored.toFixed(1)} units restored at 05:00 today` : ""}`} style={{ height: 18, borderRadius: 10, background: "#0b1215", border: `1px solid ${palette.line}`, overflow: "hidden", position: "relative" }}>
@@ -1146,6 +1354,14 @@ export default function Winifred() {
     // eslint-disable-next-line
     [state && state.logs, state && state.budget, todayK]
   );
+  // BAR-10: the user's own trailing seven days against the median of the four
+  // windows before them. Memoised on the same keys as the capacity walk; it does
+  // not read the budget at all, which is the point of it.
+  const baseline = useMemo(
+    () => (state ? baselineAt(state.logs, now, maxDaySeen) : null),
+    // eslint-disable-next-line
+    [state && state.logs, todayK]
+  );
 
   // DAT-7: an export that arrives on the device as a file can be opened
   // straight into the app rather than found again through the picker. The
@@ -1197,6 +1413,9 @@ export default function Winifred() {
   const dow = (weekdayOfKey(todayK) + 6) % 7;
   const isSunday = dow === 6;
 
+  // TIM-6 keeps the season's *length* on elapsed duration from its start
+  // timestamp, so it cannot be shortened by flying east, and SSN-3 reads this
+  // same number at day 28. It is deliberately not a count of boundaries.
   const seasonDayNum = Math.min(28, Math.floor((now - state.seasonStart) / DAY) + 1);
   // TIM-6: days are enumerated by stepping the day key. Adding 24 hours to the
   // season's start drifts an hour at a clock change, and where the season began
@@ -1205,11 +1424,20 @@ export default function Winifred() {
   // earned simply vanished.
   const seasonStartKey = state.seasonStartDay || dayKey(state.seasonStart);
   const seasonLogsDays = new Set(state.logs.filter((l) => l.t >= state.seasonStart).map(logDay));
-  let dryDays = 0;
-  for (let i = 0; i < seasonDayNum - 1; i++) if (!seasonLogsDays.has(nextDayKey(seasonStartKey, i))) dryDays++;
+  // How many season days have actually closed, counted in day keys rather than
+  // taken from `seasonDayNum`. Driving the walk off a duration was an off-by-one
+  // wherever a season began after 05:00: measured on a season started at 13:16,
+  // the duration read 5 while six day keys had passed, so the walk stopped a day
+  // short and yesterday's dry day went uncredited until the following evening.
+  // Today is excluded on purpose and not by accident: a day with nothing logged
+  // in it *yet* is not a dry day, it is an unfinished one.
+  const dryDayKeys = seasonDryDayKeys(seasonStartKey, todayK, seasonLogsDays);
+  const dryDays = dryDayKeys.length;
   const seasonCravings = state.cravingsWon.filter((c) => c.t >= state.seasonStart);
   const seasonBonus = state.bonusXP.filter((b) => b.t >= state.seasonStart).reduce((a, b) => a + b.amount, 0);
-  const xp = seasonXP({ dryDays, cravings: seasonCravings, bonus: seasonBonus, mutator });
+  // SSN-7: each dry day and each beaten craving is scored under the rule that
+  // was in force when it happened, so the rotation cannot rewrite the past.
+  const xp = seasonXP({ dryDayKeys, cravings: seasonCravings, bonus: seasonBonus, mutatorAt });
   const revealed = regionsFrom(xp);
   const xpToNext = (revealed + 1) * XP_PER_REGION - xp;
   const seasonOver = seasonDayNum >= 28;
@@ -1284,7 +1512,11 @@ export default function Winifred() {
     // user nothing about which one is the one they want back.
     return `winifred-${todayK}.json`;
   }
-  function exportText() { return JSON.stringify(state, null, 2); }
+  // DAT-8: the export carries the packed form, which is the same file the app
+  // stores and roughly 45% smaller pretty-printed. DAT-3's import hydrates it,
+  // and both shapes are accepted for good: a fat export from an earlier build is
+  // already sitting on this user's phone and in their backups.
+  function exportText() { return JSON.stringify(packState(state), null, 2); }
   function downloadExport() {
     try {
       const blob = new Blob([exportText()], { type: "application/json" });
@@ -1327,6 +1559,10 @@ export default function Winifred() {
     let parsed = null;
     try { parsed = JSON.parse(text); } catch (e) { return null; }
     if (!parsed || !Array.isArray(parsed.logs) || typeof parsed.budget !== "number") return null;
+    // DAT-8: a packed log whose index has nothing behind it means the file is
+    // damaged. The picker is where that gets said, rather than the loader
+    // quietly hydrating a night as "Unrecorded drink".
+    if (!catalogueResolves(parsed)) return null;
     return parsed;
   }
   function applyImport(parsed) {
@@ -1501,6 +1737,7 @@ export default function Winifred() {
         capacity={capacity}
         restored={restoredToday}
         pausedTomorrow={pausedTomorrow}
+        baseline={baseline}
         show={state.show}
         blind={mutator.blind && !isSunday}
         now={now}
@@ -1705,7 +1942,7 @@ export default function Winifred() {
             directly above the two actions that change it. Three stacked text
             rows became one ledger line plus a chip row (MET-4, MUT-1). */}
         <div style={{ ...card, marginTop: 12, padding: 15 }}>
-          <HealthBar capacity={capacity} budget={state.budget} blind={mutator.blind} isSunday={isSunday} onExplain={() => setScreen("log")} pausedTomorrow={pausedTomorrow} restored={restoredToday} />
+          <HealthBar capacity={capacity} budget={state.budget} blind={mutator.blind} isSunday={isSunday} onExplain={() => setScreen("log")} pausedTomorrow={pausedTomorrow} restored={restoredToday} baseline={baseline} />
           <div style={{ fontSize: 13, color: palette.inkDim, marginTop: 9, lineHeight: 1.45 }}>
             {[
               state.show.kcal ? (mutator.blind && !isSunday ? "kcal hidden until Sunday" : `~${kcalFrom(usedUnits)} kcal from alcohol, last 7 days`) : null,
@@ -2190,7 +2427,7 @@ function QuestSuggester({ tier, cloudConsent, profile, onProfile, deck, onAddQue
 // are collapsed into one line each so the restoring days are legible rather than
 // a wall of empty rows.
 // =====================================================================
-function LogScreen({ shell, card, logs, budget, capacity, restored, pausedTomorrow, show, blind, now, todayKey, onRemove, onBack }) {
+function LogScreen({ shell, card, logs, budget, capacity, restored, pausedTomorrow, baseline, show, blind, now, todayKey, onRemove, onBack }) {
   const today = todayKey;
   const regen = regenPerDay(budget);
 
@@ -2248,13 +2485,21 @@ function LogScreen({ shell, card, logs, budget, capacity, restored, pausedTomorr
               No `onExplain`, since this is the screen that link leads to. */}
           <div style={{ marginBottom: 15 }}>
             <HealthBar capacity={capacity} budget={budget} blind={blind} isSunday={false}
-              pausedTomorrow={pausedTomorrow} restored={restored} />
+              pausedTomorrow={pausedTomorrow} restored={restored} baseline={baseline} />
           </div>
           <p style={{ margin: 0, fontSize: 14.5, lineHeight: 1.6, color: palette.ink }}>
             <strong>How capacity works.</strong> You have {budget} units of room. Logging a drink spends it. Each morning at 05:00, {regen.toFixed(1)} units come back, up to a full {budget}.
           </p>
           <p style={{ margin: "10px 0 0", fontSize: 14, lineHeight: 1.6, color: palette.inkDim }}>
             Nothing resets on a Monday. A heavy night is still there on Tuesday, and a quiet day pays you back the next morning. Go past zero and the room comes back the same way, a day at a time.
+          </p>
+          {/* BAR-10: the second channel has to be explained where the first one
+              is, for the same reason BAR-6 requires the refill rule to be
+              stated: a moving figure nobody can account for is not honest
+              either. It also states the wait, so the home screen never has to
+              show a placeholder. */}
+          <p style={{ margin: "10px 0 0", fontSize: 14, lineHeight: 1.6, color: palette.inkDim }}>
+            <strong style={{ color: palette.ink }}>Your usual.</strong> The line above the bar compares your last seven days with the middle of the four weeks before them. It takes no notice of your budget, so it moves the first week you drink less, whatever the bar happens to be doing. It needs twenty days logged before it will say anything, and until then the bar simply says Capacity.
           </p>
           <p style={{ margin: "10px 0 0", fontSize: 14, lineHeight: 1.6, color: palette.inkDim }}>
             How you spread it counts too. Log three or more days' worth in a single day ({concentrationThreshold(budget).toFixed(1)} units or more) and the next morning's {regen.toFixed(1)} is paused, so the same units cost more in one sitting than spread out. That follows the NHS advice to spread drinking over three or more days rather than saving it up.

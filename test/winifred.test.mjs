@@ -22,7 +22,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { dayStartLegacy, dayStartTrue, addDaysIn, dayKeyIn, weekStartIn, hourIn, offsetMsAt,
   nextDayKey, daysBetweenKeys, boundaryOfKey, weekdayOfKey, freezeLogDays,
-  weekStartKeyIn, entryTime, offsetLabel, backfillState, clampDaySeen, partsIn } from "../src/devclock.js";
+  weekStartKeyIn, entryTime, offsetLabel, backfillState, clampDaySeen, partsIn,
+  STATE_VERSION, packState, unpackState, catalogueResolves } from "../src/devclock.js";
 
 const HOUR = 3600 * 1000;
 const DAY = 24 * HOUR;
@@ -43,13 +44,27 @@ const helpers = slice("function logDay(l) {", "// ---- end of pure day maths ---
 let zone = TEST_ZONE;
 const inject = {
   HOUR, DAY,
-  dayKeyIn, weekStartIn, nextDayKey, daysBetweenKeys, boundaryOfKey, weekdayOfKey,
+  dayKeyIn, weekStartIn, weekStartKeyIn, nextDayKey, daysBetweenKeys, boundaryOfKey, weekdayOfKey,
   activeZone: () => zone,
 };
-const { logDay, effectiveDayKey, dayLabel, unitsByDay, capacityAt, capacityTimeline, regenPerDay, concentrationThreshold, refillPausedTomorrow, refillToday } =
+const EXPORTED = ["logDay", "effectiveDayKey", "dayLabel", "unitsByDay", "capacityAt", "capacityTimeline",
+  "regenPerDay", "concentrationThreshold", "refillPausedTomorrow", "refillToday",
+  // SSN-7 / TIM-6 and BAR-10 additions, all pure and all above the marker.
+  "weekIndex", "weekIndexOfKey", "MUTATOR_EPOCH_KEY", "seasonDryDayKeys",
+  "unitsInWindow", "baselineAt", "baselineNote", "BASELINE_WINDOWS", "BASELINE_MIN_WINDOWS"];
+const { logDay, effectiveDayKey, dayLabel, unitsByDay, capacityAt, capacityTimeline, regenPerDay,
+  concentrationThreshold, refillPausedTomorrow, refillToday, weekIndex, weekIndexOfKey,
+  MUTATOR_EPOCH_KEY, seasonDryDayKeys, unitsInWindow, baselineAt, baselineNote,
+  BASELINE_WINDOWS, BASELINE_MIN_WINDOWS } =
   new Function(...Object.keys(inject),
-    `${helpers}\nreturn { logDay, effectiveDayKey, dayLabel, unitsByDay, capacityAt, capacityTimeline, regenPerDay, concentrationThreshold, refillPausedTomorrow, refillToday };`
+    `${helpers}\nreturn { ${EXPORTED.join(", ")} };`
   )(...Object.values(inject));
+
+// `mod` sits above the sliced block with the other one-line maths, so it is
+// lifted by name rather than reimplemented here: the mutator rotation is indexed
+// from a fixed Monday and a week before it counts negative, which is the whole
+// reason the function exists.
+const mod = new Function(`${slice("function mod(n, m) {", "}")}\nreturn mod;`)();
 
 // The boundary is no longer computed in App.jsx at all, so these bind the
 // module's derivation to the zone under test. The app reaches the same functions
@@ -65,9 +80,14 @@ function rx(name) {
   return new Function(`return ${line.slice(line.indexOf("/"), line.lastIndexOf(";"))};`)();
 }
 const scoring = slice("const XP_PER_REGION = 20;", "function regionsFrom(xp) { return Math.min(28, Math.floor(xp / XP_PER_REGION)); }");
-const { XP_PER_REGION, MUTATORS, seasonXP, regionsFrom } = new Function(
-  `${scoring}\nreturn { XP_PER_REGION, MUTATORS, seasonXP, regionsFrom };`
-)();
+// SSN-7's resolver reaches out of this slice for the week arithmetic, so the
+// sandbox is handed the same functions the app reaches through the clock module
+// rather than the harness deciding the rotation for itself.
+const scoringInject = { mod, weekIndex, weekIndexOfKey, weekStartKeyIn, boundaryOfKey, activeZone: () => zone };
+const { XP_PER_REGION, MUTATORS, seasonXP, regionsFrom, mutatorFor, mutatorAt, mutatorAtKey } =
+  new Function(...Object.keys(scoringInject),
+    `${scoring}\nreturn { XP_PER_REGION, MUTATORS, seasonXP, regionsFrom, mutatorFor, mutatorAt, mutatorAtKey };`
+  )(...Object.values(scoringInject));
 
 const CRISIS_RE = rx("CRISIS_RE");
 const QUEST_BAN_RE = rx("QUEST_BAN_RE");
@@ -226,9 +246,41 @@ ok("the figure comes from the same walk as the bar", src.includes("refillToday(s
 // moves, and still stops under reduced motion (CMP-6 to CMP-9, NFR-9).
 ok("the companion keeps its motion", /wf-breathe|wf-sway|wf-wander|wf-blink/.test(src));
 ok("and still respects reduced motion", src.includes("usePrefersReducedMotion()"));
-ok("NFR-4: the restored figure is in words, not only in a tint", src.includes("back today`"));
+ok("NFR-4: the restored figure is in words, not only in a tint",
+  /\$\{restored\.toFixed\(1\)\} back today/.test(src));
 ok("and in the accessible name", src.includes("units restored at 05:00 today"));
-ok("MET-5: it rides in the header row, which has the spare width", src.includes("<span>Capacity{cameBack}</span>"));
+{
+  // BAR-9a: the two rows now have one rule each. The header carries the slow
+  // channel, the caption carries the day's refill news. Both of BAR-9's figures
+  // are still in words on the home screen; only the row changed, and it changed
+  // because the two would not fit in one slot at 390px.
+  ok("BAR-10 takes the header row's label slot", src.includes('{trend || "Capacity"}'));
+  ok("and the restored figure moves to the caption row with the rest of it",
+    /const note = pausedTomorrow[\s\S]{0,400}restored\.toFixed\(1\)\} back today/.test(src));
+  ok("nothing is left appending the restored figure to the header", !/cameBack/.test(src));
+  // Measured in a browser at 390x664: this slot has 211px beside "How this
+  // works", which is the figure BAR-9 recorded. Every branch below fits on one
+  // line; the sentence removed did not, at 288px.
+  // Scoped to the expression that renders the row, because the comment above it
+  // quotes the superseded sentence in order to record why it went.
+  const noteExpr = slice("const note = pausedTomorrow", '"Full. Nothing to restore.";');
+  ok("BAR-7's forfeit line no longer runs past its slot",
+    !noteExpr.includes("Three days' worth today"));
+  // Five branches, four of them templates, and each one measured in the browser
+  // against the 211px this slot has. A new branch has to be measured too, so the
+  // count is pinned rather than left open.
+  ok("and every branch of the row is one of the measured forms",
+    (noteExpr.match(/`/g) || []).length === 8 && (noteExpr.match(/\?/g) || []).length === 5);
+  ok("the forfeit is still stated on the bar, and as arithmetic rather than reproach",
+    src.includes("none tomorrow") && src.includes('"None back tomorrow"'));
+  ok("and the reason for it stays where there is room to give it (DRK-10, BAR-8)",
+    src.includes("Log three or more days' worth in a single day"));
+  // The longest string any branch can produce, since the refill is capped at
+  // budget/7 and the budget slider tops out at 30: "+4.3 back today, +4.3
+  // tomorrow", which measured 206px.
+  const longest = "+4.3 back today, +4.3 tomorrow";
+  ok(`the widest caption any budget can produce is ${longest.length} characters`, longest.length <= 30);
+}
 {
   // The original defect, as a regression guard: an hour with no day attached read
   // as plausibly past as future at 10:25 on the morning after.
@@ -312,6 +364,16 @@ group("CHT-5 capacity copy is not caught");
   "Steady as she goes. 5.0 units in hand right now.",
   "2.0 units of headroom return every morning, whatever yesterday held.",
   "3 days with nothing logged, +6.0 restored",
+  // BAR-9a and BAR-10's copy, re-run through the permission filter because R-5
+  // requires it of any change to chat, quests or copy, and because "back today"
+  // and "under your usual" are the two phrasings most likely to read as leave.
+  "+2.0 back today, +2.0 tomorrow",
+  "+2.0 back today, none tomorrow",
+  "None back tomorrow",
+  "+2.0 back today. Full.",
+  "25.0 under your usual",
+  "4.0 over your usual",
+  "Level with your usual",
 ].forEach((m) => ok(`clean: ${m.slice(0, 50)}`, !BANNED_RE.some((r) => r.test(m))));
 
 // =====================================================================
@@ -393,20 +455,25 @@ ok("capacity hook is hoisted above the loading guard",
 const mut = (name) => MUTATORS.find((m) => m.name === name);
 const ordinary = mut("Blind Week");   // baseline values: 10 / 25 / 25
 const crave = (n, late = false) => Array.from({ length: n }, () => ({ late }));
+// SSN-7 made the mutator a per-item lookup rather than one value for the season,
+// so the uniform cases below inject a resolver that returns the same rule for
+// everything. `dry(n)` stands in for n dry days, which are now identified by key.
+const uniform = (m) => () => m;
+const dry = (n) => Array.from({ length: n }, (_, i) => `2026-06-${String(i + 1).padStart(2, "0")}`);
 
 group("SSN-1 XP formula");
 eq("ordinary week, 5 dry + 2 cravings",
-  seasonXP({ dryDays: 5, cravings: crave(2), bonus: 0, mutator: ordinary }), 100);
+  seasonXP({ dryDayKeys: dry(5), cravings: crave(2), bonus: 0, mutatorAt: uniform(ordinary) }), 100);
 eq("Steady Flame doubles dry days",
-  seasonXP({ dryDays: 5, cravings: crave(2), bonus: 0, mutator: mut("Steady Flame") }), 150);
+  seasonXP({ dryDayKeys: dry(5), cravings: crave(2), bonus: 0, mutatorAt: uniform(mut("Steady Flame")) }), 150);
 eq("Night Watch pays 40 for a late craving, 25 for an early one",
-  seasonXP({ dryDays: 0, cravings: [{ late: true }, { late: false }], bonus: 0, mutator: mut("Night Watch") }), 65);
+  seasonXP({ dryDayKeys: [], cravings: [{ late: true }, { late: false }], bonus: 0, mutatorAt: uniform(mut("Night Watch")) }), 65);
 eq("late cravings are worth the ordinary 25 outside Night Watch",
-  seasonXP({ dryDays: 0, cravings: crave(2, true), bonus: 0, mutator: ordinary }), 50);
+  seasonXP({ dryDayKeys: [], cravings: crave(2, true), bonus: 0, mutatorAt: uniform(ordinary) }), 50);
 eq("bonus XP adds flat",
-  seasonXP({ dryDays: 0, cravings: [], bonus: 35, mutator: ordinary }), 35);
+  seasonXP({ dryDayKeys: [], cravings: [], bonus: 35, mutatorAt: uniform(ordinary) }), 35);
 ok("nothing in the formula can subtract (P2: no XP penalty)",
-  seasonXP({ dryDays: 0, cravings: [], bonus: 0, mutator: ordinary }) === 0);
+  seasonXP({ dryDayKeys: [], cravings: [], bonus: 0, mutatorAt: uniform(ordinary) }) === 0);
 
 group("SSN-2 XP clears the fog");
 eq("one region costs XP_PER_REGION", regionsFrom(XP_PER_REGION), 1);
@@ -417,9 +484,9 @@ ok("the map caps at 28 regions", regionsFrom(99999) === 28);
 {
   // The regression that started this: under the old unweighted count the two
   // XP-only mutators changed nothing a user could see.
-  const behaviour = { dryDays: 10, cravings: crave(4), bonus: 0 };
-  const plain = regionsFrom(seasonXP({ ...behaviour, mutator: ordinary }));
-  const flame = regionsFrom(seasonXP({ ...behaviour, mutator: mut("Steady Flame") }));
+  const behaviour = { dryDayKeys: dry(10), cravings: crave(4), bonus: 0 };
+  const plain = regionsFrom(seasonXP({ ...behaviour, mutatorAt: uniform(ordinary) }));
+  const flame = regionsFrom(seasonXP({ ...behaviour, mutatorAt: uniform(mut("Steady Flame")) }));
   ok(`Steady Flame clears more fog than an ordinary week for identical behaviour (${plain} -> ${flame})`, flame > plain);
 }
 ok("the map no longer reads raw day and craving counts",
@@ -732,7 +799,9 @@ group("TIM-2 the whole backfill, on every shape of state that can arrive");
   ok("a v1 store gains the offset in force then", m.logs[0].tzo === 60);
   ok("a v1 store gains its season's start day", m.seasonStartDay === "2026-08-20");
   ok("a v1 store gains both forecast bounds", m.predictions[0].weekendKey === "2026-08-29" && m.predictions[0].weekendEndKey === "2026-08-31");
-  ok("and is recorded as current", m.stateVersion === 2);
+  // Read from the module rather than written out, so bumping the version for a
+  // new migration cannot leave this assertion quietly checking the old one.
+  ok("and is recorded as current", m.stateVersion === STATE_VERSION);
   // The version gate this replaced passed its own tests and did nothing, because
   // the defaults merge supplied the current version before it was consulted.
   const alreadyClaiming = backfillState({ ...v1, stateVersion: 2 }, zone);
@@ -950,6 +1019,282 @@ group("DAT-7 a file arriving from outside is asked about, not applied");
   // opened file belongs.
   ok("an opened file goes to the window already running",
     /launch_handler:\s*\{ client_mode: "focus-existing" \}/.test(cfg));
+}
+
+// =====================================================================
+// BAR-4: the walk's guard is a bound on this history, not a constant
+// =====================================================================
+group("BAR-4 the walk reaches today however long the history is");
+{
+  // The defect, directly: the guard was 4000 iterations, which is ten years and
+  // eleven months, so on the 4001st day after a first log the walk stopped short
+  // of today and the bar simply froze at a figure from 2036. Nothing errored and
+  // nothing was incorrect about any single step of it.
+  const long = [L(0, 4), L(4100, 10)];
+  eq("a drink logged on day 4100 is still counted", capacityAt(long, B, at(4100, 23)), 4);
+  const tl = capacityTimeline(long, B, at(4100, 23));
+  ok("the timeline ends on today, not on an iteration limit",
+    tl[tl.length - 1].key === dayKeyIn(at(4100, 23), zone));
+  eq("and twenty years of history still lands on the right figure",
+    capacityAt([L(0, 4), L(7300, 12)], B, at(7300, 23)), 2);
+  ok("the guard is derived from the span rather than written out",
+    /const limit = Math\.max\(1, daysBetweenKeys\(cur, today\) \+ 1\) \+ 1;/.test(src));
+  ok("and no magic day count is left in the walk", !/guard\+\+ < 4000/.test(src));
+}
+
+// =====================================================================
+// SSN-7: XP is earned under the rule in force at the time
+// =====================================================================
+group("SSN-7 the mutator rotation cannot rewrite the past");
+{
+  // Every week keeps the mutator the absolute-millisecond arithmetic gave it.
+  // The rotation is now stepped in day keys (TIM-6's rule), and the epoch is
+  // chosen so the phase is identical; this holds it there.
+  let anomalies = 0, mismatches = 0, prev = null;
+  for (let d = Date.UTC(2024, 0, 1); d < Date.UTC(2031, 0, 1); d += DAY) {
+    const t = d + 12 * HOUR;
+    const key = weekStartKeyIn(t, zone);
+    const legacy = Math.floor(weekStartIn(t, zone) / (7 * DAY));
+    if (prev && prev.key !== key && weekIndexOfKey(key) - prev.i !== 1) anomalies++;
+    if (mod(legacy, 4) !== mod(weekIndexOfKey(key), 4)) mismatches++;
+    prev = { key, i: weekIndexOfKey(key) };
+  }
+  ok(`the rotation advances exactly one week at a time, clock changes included (${anomalies} anomalies)`, anomalies === 0);
+  ok(`and every week from 2024 to 2030 keeps the rule it already had (${mismatches} mismatches)`, mismatches === 0);
+  ok("a week before the epoch indexes into the array rather than off it",
+    !!mutatorAtKey(nextDayKey(MUTATOR_EPOCH_KEY, -21)) && !!mutatorAtKey("2019-01-07"));
+
+  // The measured regression. One dry day banked in a Steady Flame week is worth
+  // 20 XP, which is one region clear. Read the following Monday, under Night
+  // Watch, the old formula rescored it at 10 and the region vanished off the map
+  // with nothing logged and nothing done.
+  const flameWeekDay = "2026-09-03";   // Thu, week of Mon 31 Aug: Steady Flame
+  const nightWeekDay = "2026-09-08";   // Tue, week of Mon 07 Sep: Night Watch
+  ok("the two days really do sit in different mutator weeks",
+    mutatorAtKey(flameWeekDay).name === "Steady Flame" && mutatorAtKey(nightWeekDay).name === "Night Watch");
+  const earned = seasonXP({ dryDayKeys: [flameWeekDay], cravings: [], bonus: 0, mutatorAt });
+  eq("a dry day is scored under the week it fell in", earned, 20);
+  eq("one region cleared", regionsFrom(earned), 1);
+  eq("and it is still 20 when read from inside the next week", seasonXP({ dryDayKeys: [flameWeekDay], cravings: [], bonus: 0, mutatorAt }), 20);
+  ok("so the region is still there (this is the defect, as a guard)", regionsFrom(seasonXP({ dryDayKeys: [flameWeekDay], cravings: [], bonus: 0, mutatorAt })) === 1);
+  // What the old formula did, reconstructed: one mutator applied to everything.
+  const asIfUniform = [flameWeekDay].length * mutatorAtKey(nightWeekDay).dryXP;
+  ok(`the superseded uniform scoring would have halved it (${asIfUniform} vs ${earned})`, asIfUniform < earned);
+  // A late craving beaten during Night Watch keeps its 40 when Blind Week
+  // arrives, which is the same rule read from the other side.
+  const lateCraving = [{ t: boundaryOfKey(nightWeekDay, zone) + 15 * HOUR, late: true }];
+  eq("a late craving keeps the 40 it was beaten for", seasonXP({ dryDayKeys: [], cravings: lateCraving, bonus: 0, mutatorAt }), 40);
+  ok("the component passes the resolver, not this week's rule",
+    src.includes("const xp = seasonXP({ dryDayKeys, cravings: seasonCravings, bonus: seasonBonus, mutatorAt })"));
+  ok("and nothing multiplies a dry-day count by one mutator any more",
+    !/dryDays \* mutator\.dryXP/.test(src));
+}
+
+// =====================================================================
+// TIM-6: the season's days are counted as days, not as a duration
+// =====================================================================
+group("TIM-6 dry days are enumerated by key");
+{
+  const none = new Set();
+  ok("a season on its first day has nothing closed yet",
+    seasonDryDayKeys("2026-09-02", "2026-09-02", none).length === 0);
+  eq("five closed days, none logged", seasonDryDayKeys("2026-09-02", "2026-09-07", none).length, 5);
+  ok("today is never counted, however dry it looks",
+    !seasonDryDayKeys("2026-09-02", "2026-09-07", none).includes("2026-09-07"));
+  // The measured case: a season started at 13:16 on 2 September, read on the
+  // morning of the 7th. Six day keys have passed; the duration said five, so the
+  // walk stopped a day short and the 6th was never examined.
+  const logged = new Set(["2026-09-02", "2026-09-04", "2026-09-05", "2026-09-06"]);
+  const keys = seasonDryDayKeys("2026-09-02", "2026-09-07", logged);
+  ok("yesterday is examined rather than left until tomorrow", keys.includes("2026-09-03") && keys.length === 1);
+  {
+    // Had yesterday been dry it would now be credited, which is the half of the
+    // defect the real data could not show.
+    const otherwise = new Set(["2026-09-02", "2026-09-04", "2026-09-05"]);
+    ok("a dry yesterday is credited today, not a day late",
+      seasonDryDayKeys("2026-09-02", "2026-09-07", otherwise).includes("2026-09-06"));
+  }
+  eq("a season cannot enumerate past its own length",
+    seasonDryDayKeys("2026-01-01", "2027-01-01", none).length, 28);
+  ok("the walk no longer reads the duration figure",
+    !/for \(let i = 0; i < seasonDayNum - 1; i\+\+\)/.test(src));
+  ok("SSN-3 still reads the season's length as elapsed duration (TIM-6)",
+    src.includes("Math.min(28, Math.floor((now - state.seasonStart) / DAY) + 1)"));
+}
+
+// =====================================================================
+// DRK-11 / DAT-8: the packed log
+// =====================================================================
+group("DRK-11 the log points at a catalogue it cannot have edited");
+{
+  const fat = [
+    { t: 1, day: "2026-09-02", tzo: 60, label: "Hawkstone Session", ml: 568, abv: 4, units: 2.3, cost: 6.5 },
+    { t: 2, day: "2026-09-02", tzo: 60, label: "Hawkstone Session", ml: 568, abv: 4, units: 2.3, cost: 6.5 },
+    { t: 3, day: "2026-09-04", tzo: 60, label: "Hells", ml: 440, abv: 4.6, units: 2, cost: 2.5 },
+    { t: 4, day: "2026-09-04", tzo: 60, label: "Pint out", ml: 568, abv: 4.5, units: 2.6, cost: 6.5, seed: "beer" },
+  ];
+  const sameLogs = (a, b) => a.length === b.length && a.every((x, i) => {
+    const ka = Object.keys(x).sort(), kb = Object.keys(b[i]).sort();
+    return JSON.stringify(ka) === JSON.stringify(kb) && ka.every((k) => x[k] === b[i][k]);
+  });
+  const held = { budget: 14, drinks: [{ label: "Hells", ml: 440, abv: 4.6, units: 2, cost: 2.5 }], logs: fat };
+  const packed = packState(held);
+  // Checked before anything reads it, so a packer that quietly returns its input
+  // reports a failure here rather than throwing and taking the rest of the
+  // group's checks down with it.
+  ok("packing produces a catalogue", Array.isArray(packed.drinkCat));
+  const cat = packed.drinkCat || [];
+  ok("repeated drinks collapse to one catalogue row", cat.length === 3);
+  ok("an entry keeps only its own time fields plus an index",
+    JSON.stringify(Object.keys(packed.logs[0] || {}).sort()) === JSON.stringify(["c", "day", "t", "tzo"]));
+  ok("the round trip is lossless", sameLogs(unpackState(packed).logs, fat));
+  ok("a field riding along on a seeded button survives it", unpackState(packed).logs[3].seed === "beer");
+  ok("packing is idempotent", JSON.stringify(packState(packed)) === JSON.stringify(packed));
+  ok("hydrating twice is idempotent",
+    sameLogs(unpackState(unpackState(packed)).logs, fat));
+  ok("the catalogue never survives into held state", !("drinkCat" in unpackState(packed)));
+
+  // The reason this is not a pointer into `state.drinks`. TIM-1 settled that the
+  // day a drink belongs to is frozen at logging; what was in the glass is the
+  // same class of fact, and the deck is edited by the user all the time.
+  const edited = unpackState(packed);
+  edited.drinks = [{ label: "Hells", ml: 440, abv: 5.2, units: 2.3, cost: 3.1 }];
+  ok("editing the drink deck cannot rewrite a night already logged",
+    sameLogs(unpackState(packState(edited)).logs, fat));
+  ok("and the catalogue is derived from the logs, never from the deck",
+    !JSON.stringify(packState(edited).drinkCat || []).includes("5.2"));
+
+  // DRK-10 removes entries, so a row nothing points at any more should go.
+  const trimmed = unpackState(packed);
+  trimmed.logs = trimmed.logs.filter((l) => l.label !== "Hells");
+  ok("a catalogue row the last log left behind is dropped on the next write",
+    (packState(trimmed).drinkCat || []).length === 2);
+
+  // Size, measured rather than asserted as a principle.
+  const fatBytes = JSON.stringify(held).length;
+  const slimBytes = JSON.stringify(packed).length;
+  ok(`the store is smaller for it (${fatBytes} -> ${slimBytes} bytes)`, slimBytes < fatBytes);
+  {
+    const many = Array.from({ length: 1040 }, (_, i) => ({ ...fat[i % 2], t: i + 10 }));
+    const a = JSON.stringify({ budget: 14, logs: many }).length;
+    const b = JSON.stringify(packState({ budget: 14, logs: many })).length;
+    ok(`a year of logging drops by more than half (${(a / 1024).toFixed(0)} KiB -> ${(b / 1024).toFixed(0)} KiB)`, b < a * 0.5);
+  }
+
+  // A damaged file, and the two different jobs the loader and the picker have.
+  const broken = { budget: 14, logs: [{ c: 9, t: 1, day: "2026-09-02", tzo: 60 }], drinkCat: [] };
+  ok("DAT-8: the picker refuses a file whose indices resolve to nothing", !catalogueResolves(broken));
+  ok("and accepts a well-formed one", catalogueResolves(packed));
+  ok("a fat export from an earlier build is still accepted", catalogueResolves(held));
+  ok("the loader keeps the night rather than dropping it",
+    unpackState(broken).logs.length === 1 && unpackState(broken).logs[0].label === "Unrecorded drink");
+  ok("and says what it is rather than counting it as nothing real",
+    unpackState(broken).logs[0].units === 0);
+
+  // Wiring: three funnels, and all three have to be the packed form.
+  ok("the one write path packs", /localStorage\.setItem\(storeKey\(\), JSON\.stringify\(packState\(s\)\)\)/.test(src));
+  ok("the migration hydrates before anything else reads the logs",
+    /const parsed = unpackState\(input\);/.test(src) &&
+    src.indexOf("const parsed = unpackState(input);") < src.indexOf("...JSON.parse(JSON.stringify(defaultState)), ...parsed,"));
+  ok("DAT-2/DAT-8: the export carries the packed form", /JSON\.stringify\(packState\(state\), null, 2\)/.test(src));
+  ok("DAT-3: the shape check includes the catalogue", /if \(!catalogueResolves\(parsed\)\) return null;/.test(src));
+  ok("nothing puts the catalogue into defaultState", !/^\s*drinkCat:/m.test(src));
+}
+
+// =====================================================================
+// BAR-10: the self-relative channel
+// =====================================================================
+group("BAR-10 measured against the user, not the budget");
+{
+  // A day key n days before 1 Sep 2026, so the fixtures read as calendar weeks.
+  const day = (n) => nextDayKey("2026-09-01", n);
+  const logsFor = (perDay) => Object.entries(perDay).flatMap(([k, u]) =>
+    [{ t: boundaryOfKey(k, zone) + 20 * HOUR, day: k, tzo: 60, units: u, cost: 5, label: "x" }]);
+  const nowOn = (k) => boundaryOfKey(k, zone) + 22 * HOUR;
+
+  ok("no history says nothing at all", baselineAt([], nowOn(day(0)), null) === null);
+  {
+    // Six days of history: not one complete prior window, let alone two.
+    const b = baselineAt(logsFor({ [day(-5)]: 4, [day(-1)]: 6 }), nowOn(day(0)), null);
+    ok("one week in, there is no baseline yet", b.baseline === null);
+    eq("and it says how many days are still needed", b.needDays, 15);
+    ok("the bar keeps its label rather than showing a placeholder", baselineNote(b) === null);
+  }
+  {
+    // Twenty days of history is the point two whole prior windows exist.
+    const per = {};
+    for (let i = -20; i <= 0; i++) per[day(i)] = 2;
+    const b = baselineAt(logsFor(per), nowOn(day(0)), null);
+    ok("twenty days in, the channel opens", b.baseline !== null && b.windows === 2);
+    eq("no needDays left to serve", b.needDays, 0);
+    eq("current window", b.current, 14);
+    eq("baseline of two identical windows", b.baseline, 14);
+    ok("and a steady fortnight reads as level", baselineNote(b) === "Level with your usual");
+  }
+  {
+    // Four prior windows of 40, 40, 10, 40 and a current one of 20. The median
+    // is 40, so the holiday week does not drag the standard down; a mean would
+    // have made 20 look like only a small improvement.
+    const per = {};
+    const weeks = [40, 40, 10, 40];            // windows 1..4 back
+    for (let w = 1; w <= 4; w++) for (let i = 0; i < 7; i++) per[day(-7 * w - i)] = weeks[w - 1] / 7;
+    for (let i = 0; i < 7; i++) per[day(-i)] = 20 / 7;
+    const b = baselineAt(logsFor(per), nowOn(day(0)), null);
+    eq("four windows are in play", b.windows, 4);
+    eq("the median ignores the outlier week", b.baseline, 40);
+    eq("the trailing week", b.current, 20);
+    ok("and the copy names the gap in units", baselineNote(b) === "20.0 under your usual");
+  }
+  {
+    // Drinking more than usual says so, in the same register and with no colour,
+    // no target and nothing about a body (P1, BAR-6).
+    const per = {};
+    for (let w = 1; w <= 4; w++) for (let i = 0; i < 7; i++) per[day(-7 * w - i)] = 2;
+    for (let i = 0; i < 7; i++) per[day(-i)] = 5;
+    const b = baselineAt(logsFor(per), nowOn(day(0)), null);
+    ok("over reads as over", baselineNote(b) === "21.0 over your usual");
+  }
+  {
+    // A window reaching back before the first log would count days the user was
+    // not being measured on as abstinent ones, making every real week look worse
+    // than it was: dishonest under P2 and on the discouraging side of it.
+    const per = {};
+    for (let i = 0; i <= 27; i++) per[day(-i)] = 2;
+    const b = baselineAt(logsFor(per), nowOn(day(0)), null);
+    ok(`only whole windows inside recorded history count (${b.windows})`, b.windows === 3);
+  }
+  {
+    // Half a unit either way is a rounding difference, not a trend.
+    const per = {};
+    for (let w = 1; w <= 4; w++) for (let i = 0; i < 7; i++) per[day(-7 * w - i)] = 2;
+    for (let i = 0; i < 7; i++) per[day(-i)] = i === 0 ? 2.4 : 2;
+    ok("a 0.4 difference is not a direction", baselineNote(baselineAt(logsFor(per), nowOn(day(0)), null)) === "Level with your usual");
+  }
+  {
+    // Seven day keys inclusive of the end day, which is the window MET-4 makes
+    // the bar, the home-screen figures and the companion's mood share.
+    const m = new Map([["2026-09-01", 3], ["2026-08-26", 9], ["2026-08-25", 100]]);
+    eq("the seventh day back is inside the window", unitsInWindow(m, "2026-09-01"), 12);
+    ok("the eighth is not", unitsInWindow(m, "2026-09-01") < 100);
+  }
+  ok("four windows of context, two before it will speak",
+    BASELINE_WINDOWS === 4 && BASELINE_MIN_WINDOWS === 2);
+  ok("BAR-10 takes no notice of the budget at all",
+    !/baselineAt\([^)]*budget/.test(src) && !/function baselineAt\(logs, now, maxSeen, budget/.test(src));
+  ok("it rides in the header row's label slot, so MET-5 keeps its pixels",
+    src.includes('<span>{trend || "Capacity"}</span>'));
+  ok("BAR-3: hidden with every other unit-derived figure under Blind Week",
+    src.includes("const trend = hidden ? null : baselineNote(baseline);"));
+  ok("BAR-6: nothing in the copy claims anything about a body",
+    !/(liver|blood|sober|metabolis|process(es|ed)? alcohol|recover(s|y)? by)/i.test(
+      src.slice(src.indexOf("function baselineNote"), src.indexOf("// ---- end of pure day maths ----"))));
+  ok("NFR-6: and it is not a target, a goal or a permission",
+    !/(you've earned|goal|target|should be|well done)/i.test(
+      src.slice(src.indexOf("function baselineNote"), src.indexOf("// ---- end of pure day maths ----"))));
+  ok("DRK-10 explains it where the refill rule is explained (BAR-6)",
+    src.includes("Your usual.") && src.includes("It needs twenty days logged"));
+  ok("and the memo does not run on the one-second tick",
+    /const baseline = useMemo\(\n\s+\(\) => \(state \? baselineAt/.test(src));
 }
 
 // =====================================================================
